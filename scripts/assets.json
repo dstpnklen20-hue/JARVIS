@@ -1,0 +1,58 @@
+{
+  "assets": [
+    {
+      "id": "vosk-lib",
+      "name": "libvosk 0.3.45",
+      "description": "движок распознавания речи, Windows x64 (последняя сборка под Windows)",
+      "url": "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-win64-0.3.45.zip",
+      "sha256": "f1dcc9cca460630f81ea8f71794f69c80bed6556d2a4e6237b5785e1d2dff34b",
+      "size": 14882445,
+      "base": "native_libs",
+      "dir": "vosk-win64-0.3.45",
+      "required": true,
+      "files": [
+        "libvosk.dll",
+        "libvosk.lib",
+        "libgcc_s_seh-1.dll",
+        "libstdc++-6.dll",
+        "libwinpthread-1.dll"
+      ]
+    },
+    {
+      "id": "vosk-model-small-ru",
+      "name": "Vosk small-ru 0.22",
+      "description": "русская модель для команд, поддерживает грамматику",
+      "url": "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
+      "sha256": "961d5ff98a17f4aa6de69864d0aa71fa5bac682301d2b5d17a3f24c5c99a46d4",
+      "size": 46236750,
+      "base": "models",
+      "dir": "vosk-model-small-ru-0.22",
+      "required": true,
+      "files": [
+        "am/final.mdl",
+        "conf/model.conf",
+        "conf/mfcc.conf",
+        "graph/HCLr.fst",
+        "graph/Gr.fst",
+        "ivector/final.ie"
+      ]
+    },
+    {
+      "id": "vosk-model-ru",
+      "name": "Vosk ru 0.42",
+      "description": "полная русская модель для свободной речи (этап 7)",
+      "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip",
+      "sha256": "00eb9e5ed8230492da1acf702cd3548e1282256a5fdde8f188253e77217e9429",
+      "size": 1937602113,
+      "base": "models",
+      "dir": "vosk-model-ru-0.42",
+      "required": false,
+      "files": [
+        "am/final.mdl",
+        "conf/model.conf",
+        "graph/HCLG.fst",
+        "ivector/final.ie"
+      ]
+    }
+  ]
+}

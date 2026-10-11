@@ -1,0 +1,109 @@
+//! Платформозависимый код. Всё, что касается WinAPI, живёт здесь, чтобы
+//! остальные крейты оставались переносимыми и без `unsafe`.
+
+use std::fmt;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows as imp;
+
+#[cfg(not(windows))]
+mod unsupported;
+#[cfg(not(windows))]
+use unsupported as imp;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PlatformError {
+    #[error("{call} завершился с ошибкой Win32 {code}")]
+    Win32 { call: &'static str, code: u32 },
+    #[error("не поддерживается на этой платформе")]
+    Unsupported,
+}
+
+/// Версия операционной системы.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsInfo {
+    /// Например, «Windows 11 Pro».
+    pub product: String,
+    /// Например, «24H2». Может быть пустым на старых сборках.
+    pub display_version: String,
+    pub build: u32,
+    /// Номер накопительного обновления (Update Build Revision).
+    pub revision: u32,
+}
+
+impl fmt::Display for OsInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.product)?;
+        if !self.display_version.is_empty() {
+            write!(f, " {}", self.display_version)?;
+        }
+        write!(f, " (сборка {}.{})", self.build, self.revision)
+    }
+}
+
+/// Сборки Windows начиная с этой — Windows 11.
+pub const WINDOWS_11_FIRST_BUILD: u32 = 22000;
+
+/// Минимальная поддерживаемая сборка: Windows 10 1809.
+pub const MIN_SUPPORTED_BUILD: u32 = 17763;
+
+pub fn os_info() -> Result<OsInfo, PlatformError> {
+    imp::os_info()
+}
+
+/// Запущен ли процесс с правами администратора (повышенный токен).
+pub fn is_elevated() -> Result<bool, PlatformError> {
+    imp::is_elevated()
+}
+
+/// Реестр Windows 11 по историческим причинам пишет в `ProductName`
+/// «Windows 10». Исправляем по номеру сборки.
+fn fix_product_name(product: &str, build: u32) -> String {
+    if build >= WINDOWS_11_FIRST_BUILD {
+        product.replacen("Windows 10", "Windows 11", 1)
+    } else {
+        product.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_name_is_fixed_for_windows_11() {
+        assert_eq!(fix_product_name("Windows 10 Pro", 26100), "Windows 11 Pro");
+        assert_eq!(fix_product_name("Windows 10 Pro", 19045), "Windows 10 Pro");
+        assert_eq!(
+            fix_product_name("Windows 11 Home", 26100),
+            "Windows 11 Home"
+        );
+    }
+
+    #[test]
+    fn display_formats_all_parts() {
+        let info = OsInfo {
+            product: "Windows 11 Pro".into(),
+            display_version: "24H2".into(),
+            build: 26100,
+            revision: 4061,
+        };
+        assert_eq!(info.to_string(), "Windows 11 Pro 24H2 (сборка 26100.4061)");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_os_info_is_readable() {
+        let info = os_info().unwrap();
+        assert!(info.build >= MIN_SUPPORTED_BUILD, "{info}");
+        assert!(info.product.starts_with("Windows"), "{info}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn elevation_check_does_not_fail() {
+        is_elevated().unwrap();
+    }
+}

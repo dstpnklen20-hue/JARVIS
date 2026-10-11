@@ -1,0 +1,23 @@
+[package]
+name = "jarvis-app"
+description = "Демон Джарвиса"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "jarvis"
+path = "src/main.rs"
+
+[dependencies]
+jarvis-core.workspace = true
+jarvis-platform.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+cpal.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

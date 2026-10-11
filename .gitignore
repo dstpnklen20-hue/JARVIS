@@ -1,0 +1,15 @@
+/target/
+
+# Личные настройки и разрешения пользователя
+/config/user.toml
+/config/permissions.toml
+
+# Скачиваемые модели и нативные библиотеки (scripts/download-models.ps1)
+/models/
+/lib/
+
+# Логи и журнал действий
+/logs/
+
+# Отладочные записи аудио
+/recordings/
