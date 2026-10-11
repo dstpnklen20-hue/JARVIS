@@ -2,6 +2,7 @@
 
 mod bench;
 mod check;
+mod core;
 mod daemon;
 mod enroll;
 mod hearing;

@@ -16,8 +16,17 @@ use unsupported as imp;
 /// Цикл сообщений главного потока и обработка Ctrl+C / закрытия консоли.
 #[cfg(windows)]
 pub use windows::{
-    Waker, current_waker, install_ctrl_handler, notify_shutdown_complete, run_message_loop,
+    LoopEvent, Waker, current_waker, install_ctrl_handler, notify_shutdown_complete,
+    run_message_loop,
 };
+
+/// Глобальные горячие клавиши (аварийная остановка).
+#[cfg(windows)]
+pub use windows::{HotkeyGuard, parse_hotkey, register_hotkey};
+
+/// Окно-вопрос с кнопками (вопрос-разрешение).
+#[cfg(windows)]
+pub use windows::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 
 /// Системные действия команд: открыть адрес, мультимедиа-клавиши.
 #[cfg(windows)]
@@ -157,6 +166,39 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[ignore = "на полсекунды показывает окно"]
+    fn dialog_can_be_closed_from_outside() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut handle = show_dialog(
+            DialogSpec {
+                title: "Джарвис — тест".into(),
+                heading: "Проверка окна".into(),
+                text: "Окно закроется само.".into(),
+                buttons: vec![
+                    DialogButton {
+                        id: 100,
+                        label: "Да".into(),
+                    },
+                    DialogButton {
+                        id: 101,
+                        label: "Нет".into(),
+                    },
+                ],
+                default_button: 101,
+            },
+            move |result| {
+                let _ = tx.send(result);
+            },
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        handle.close();
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(result, None, "закрыто извне — без нажатой кнопки");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn waker_from_other_thread_ends_loop() {
         let waker = current_waker();
         let mut ticks = 0;
@@ -164,7 +206,7 @@ mod tests {
             waker.wake();
             waker.quit();
         });
-        run_message_loop(std::time::Duration::from_secs(5), || {
+        run_message_loop(std::time::Duration::from_secs(5), |_| {
             ticks += 1;
             std::ops::ControlFlow::Continue(())
         })

@@ -16,7 +16,7 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, KillTimer, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW,
-    SetTimer, TranslateMessage, WM_APP, WM_USER,
+    SetTimer, TranslateMessage, WM_APP, WM_HOTKEY, WM_USER,
 };
 use windows_sys::core::BOOL;
 
@@ -75,11 +75,20 @@ pub fn current_waker() -> Waker {
     }
 }
 
-/// Крутит цикл сообщений текущего потока. `on_tick` вызывается после каждого
-/// сообщения, по `Waker::wake` и по таймеру; `Break` завершает цикл.
+/// Что разбудило цикл сообщений.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopEvent {
+    /// Сообщение, `Waker::wake` или таймер — проверьте свои каналы.
+    Tick,
+    /// Нажата глобальная горячая клавиша с этим номером.
+    Hotkey(i32),
+}
+
+/// Крутит цикл сообщений текущего потока. `on_event` вызывается после
+/// каждого сообщения, по `Waker::wake` и по таймеру; `Break` завершает цикл.
 pub fn run_message_loop(
     tick: Duration,
-    mut on_tick: impl FnMut() -> ControlFlow<()>,
+    mut on_event: impl FnMut(LoopEvent) -> ControlFlow<()>,
 ) -> Result<(), PlatformError> {
     let tick_ms = u32::try_from(tick.as_millis()).unwrap_or(u32::MAX).max(10);
     // SAFETY: таймер потока (без окна и без callback): приходит как WM_TIMER
@@ -98,18 +107,20 @@ pub fn run_message_loop(
             0 => break Ok(()), // WM_QUIT
             _ => {}
         }
-        match msg.message {
+        let event = match msg.message {
             WM_JARVIS_QUIT => break Ok(()),
-            WM_JARVIS_WAKE => {}
+            WM_JARVIS_WAKE => LoopEvent::Tick,
+            WM_HOTKEY => LoopEvent::Hotkey(msg.wParam as i32),
             _ => {
                 // SAFETY: сообщение только что получено GetMessageW.
                 unsafe {
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
+                LoopEvent::Tick
             }
-        }
-        if on_tick().is_break() {
+        };
+        if on_event(event).is_break() {
             break Ok(());
         }
     };

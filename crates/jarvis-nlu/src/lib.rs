@@ -3,6 +3,7 @@
 //!
 //! Чистые функции без ввода-вывода — всё проверяется тестами.
 
+pub mod answers;
 pub mod matcher;
 pub mod normalize;
 pub mod numbers;

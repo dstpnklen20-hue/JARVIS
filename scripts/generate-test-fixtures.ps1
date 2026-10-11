@@ -63,7 +63,17 @@ Make commands media_previous__irina      $irina 'Предыдущий трек.'
 Make commands media_volume_up__pavel     $pavel 'Сделай громче.'
 Make commands media_volume_down__irina   $irina 'Тише.'
 Make commands media_mute__pavel          $pavel 'Выключи звук.'
+Make commands builtin_stop__pavel        $pavel 'Стоп.'
+Make commands builtin_forget_permissions__irina $irina 'Забудь разрешения.'
 Make commands unknown_bread__irina       $irina 'Купи хлеба и молока.'
+
+# Ответы на вопрос-разрешение. Имя файла = ожидаемый ответ.
+Make answers yes__pavel                  $pavel 'Да.'
+Make answers yes__irina                  $irina 'Разрешаю.'
+Make answers always__pavel               $pavel 'Разрешаю всегда.'
+Make answers no__irina                   $irina 'Нет.'
+Make answers no__pavel_cancel            $pavel 'Отмена.'
+Make answers never__irina                $irina 'Никогда.'
 Make commands unknown_weather__pavel     $pavel 'Какая завтра погода в Москве?'
 
 # Образцы для --enroll: один голос, разная подача.

@@ -6,7 +6,9 @@
 pub mod assets;
 pub mod commands;
 pub mod config;
+pub mod journal;
 pub mod logging;
+pub mod permissions;
 pub mod root;
 pub mod state;
 

@@ -7,11 +7,14 @@
 //!
 //! ```text
 //! PAUSED ⇄ IDLE ──«Джарвис»──▶ LISTENING ──команда──▶ EXECUTING ──готово──▶ FOLLOW_UP
-//!            ▲                     │ тайм-аут                                 │ команда → EXECUTING
-//!            └─────────────────────┴──────────────── тайм-аут ────────────────┘
+//!            ▲                     │ нет разрешения        ▲                    │ команда → …
+//!            │                     ▼                       │ да / всегда        │
+//!            │              ASKING_PERMISSION ─────────────┘                    │
+//!            │                     │ нет / никогда → FOLLOW_UP; тишина → IDLE   │
+//!            └─────────────────────┴──────────────── тайм-аут ──────────────────┘
 //! ```
 //!
-//! ASKING_PERMISSION появится на этапе 3, GAME_MODE — на этапе 6.
+//! Аварийная остановка из любого состояния → PAUSED. GAME_MODE — этап 6.
 
 use std::time::{Duration, Instant};
 
@@ -27,6 +30,8 @@ pub enum State {
     Executing,
     /// После команды ещё ждём следующую без «Джарвис» до `until`.
     FollowUp { until: Instant },
+    /// Спросили разрешение, ждём ответа до `until` (тишина — отказ).
+    AskingPermission { until: Instant },
 }
 
 impl State {
@@ -40,8 +45,16 @@ impl State {
 pub enum Event {
     /// Распознано слово активации (и, если включено, подтверждён голос).
     WakeWord,
-    /// Распознана команда с этим id.
+    /// Распознана команда с этим id, и она разрешена.
     Command(String),
+    /// Распознана команда, но разрешения на неё ещё нет — спросить.
+    NeedPermission(String),
+    /// Пользователь разрешил («да» или «всегда»).
+    PermissionGranted(String),
+    /// Пользователь отказал («нет» или «никогда»).
+    PermissionDenied,
+    /// Горячая клавиша или «Джарвис, стоп».
+    EmergencyStop,
     /// Фраза не похожа ни на одну команду.
     NotUnderstood,
     /// Команда выполнена; `reply` — что сказать (уже выбрано ядром:
@@ -68,14 +81,21 @@ pub enum Reply {
     NotUnderstood,
     /// «Не удалось, сэр».
     Failed,
+    /// «Сэр, разрешите выполнить?» — вопрос-разрешение (подробности — в окне;
+    /// голосом их скажет синтез речи на этапе 5).
+    Ask,
+    /// «Как скажете, сэр» — после отказа.
+    Denied,
 }
 
 impl Reply {
-    pub const ALL: [Reply; 4] = [
+    pub const ALL: [Reply; 6] = [
         Reply::Wake,
         Reply::Done,
         Reply::NotUnderstood,
         Reply::Failed,
+        Reply::Ask,
+        Reply::Denied,
     ];
 
     /// Ключ в `pack.toml` звукового пакета и в `reply` манифеста команды.
@@ -85,6 +105,8 @@ impl Reply {
             Reply::Done => "ok",
             Reply::NotUnderstood => "not_understood",
             Reply::Failed => "failed",
+            Reply::Ask => "ask",
+            Reply::Denied => "denied",
         }
     }
 }
@@ -99,6 +121,12 @@ pub enum Effect {
     SetTranscribing(bool),
     /// Выполнить команду с этим id.
     Execute(String),
+    /// Показать окно-вопрос о разрешении для команды с этим id.
+    AskUser(String),
+    /// Убрать окно-вопрос.
+    CloseAsk,
+    /// Аварийная остановка: замолчать, отменить действие, отпустить клавиши.
+    StopAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +155,8 @@ pub struct Timings {
     pub listen: Duration,
     /// Сколько ждать следующую команду после выполненной (FOLLOW_UP).
     pub follow_up: Duration,
+    /// Сколько ждать ответа на вопрос-разрешение (раздел 2.1: 10 секунд).
+    pub ask: Duration,
 }
 
 pub fn transition(state: State, event: Event, now: Instant, timings: Timings) -> Transition {
@@ -137,7 +167,27 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         until: now + timings.listen,
     };
 
+    // Уходя из вопроса-разрешения, окно надо убрать.
+    let close_ask = matches!(state, S::AskingPermission { .. });
+    let with_close = |mut effects: Vec<Effect>| {
+        if close_ask {
+            effects.insert(0, Effect::CloseAsk);
+        }
+        effects
+    };
+
     match (state, event) {
+        // --- аварийная остановка: из любого состояния ---
+        (S::Paused, E::EmergencyStop) => Transition::to(S::Paused, vec![Effect::StopAll]),
+        (_, E::EmergencyStop) => Transition::to(
+            S::Paused,
+            with_close(vec![
+                Effect::StopAll,
+                Effect::SetTranscribing(false),
+                Effect::SetListening(false),
+            ]),
+        ),
+
         // --- пауза: из любого активного состояния ---
         (S::Paused, E::Resume | E::TogglePause) => {
             Transition::to(S::Idle, vec![Effect::SetListening(true)])
@@ -145,9 +195,39 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         (S::Paused, _) => Transition::stay(S::Paused),
         (_, E::Pause | E::TogglePause) => Transition::to(
             S::Paused,
-            vec![Effect::SetTranscribing(false), Effect::SetListening(false)],
+            with_close(vec![
+                Effect::SetTranscribing(false),
+                Effect::SetListening(false),
+            ]),
         ),
         (_, E::Resume) => Transition::stay(state),
+
+        // --- вопрос-разрешение ---
+        (S::Listening { .. } | S::FollowUp { .. }, E::NeedPermission(id)) => Transition::to(
+            S::AskingPermission {
+                until: now + timings.ask,
+            },
+            vec![Effect::PlayReply(Reply::Ask), Effect::AskUser(id)],
+        ),
+        (S::AskingPermission { .. }, E::PermissionGranted(id)) => {
+            Transition::to(S::Executing, vec![Effect::CloseAsk, Effect::Execute(id)])
+        }
+        (S::AskingPermission { .. }, E::PermissionDenied) => Transition::to(
+            S::FollowUp {
+                until: now + timings.follow_up,
+            },
+            vec![Effect::CloseAsk, Effect::PlayReply(Reply::Denied)],
+        ),
+        // Тишина 10 секунд — не выполнять (раздел 2.1).
+        (S::AskingPermission { until }, E::Tick) if now >= until => Transition::to(
+            S::Idle,
+            vec![Effect::CloseAsk, Effect::SetTranscribing(false)],
+        ),
+        // Пока ждём ответа, всё остальное не отвлекает.
+        (S::AskingPermission { .. }, _) => Transition::stay(state),
+        (_, E::NeedPermission(_) | E::PermissionGranted(_) | E::PermissionDenied) => {
+            Transition::stay(state)
+        }
 
         // --- слово активации ---
         (S::Idle | S::FollowUp { .. }, E::WakeWord) => {
@@ -195,7 +275,151 @@ mod tests {
     const T: Timings = Timings {
         listen: Duration::from_secs(6),
         follow_up: Duration::from_secs(12),
+        ask: Duration::from_secs(10),
     };
+
+    fn asking(t0: Instant) -> State {
+        State::AskingPermission { until: t0 + T.ask }
+    }
+
+    #[test]
+    fn command_without_permission_asks() {
+        let t0 = now();
+        for state in [
+            State::Listening {
+                until: t0 + T.listen,
+            },
+            State::FollowUp {
+                until: t0 + T.follow_up,
+            },
+        ] {
+            let tr = transition(state, Event::NeedPermission("yt".into()), t0, T);
+            assert_eq!(tr.next, asking(t0), "{state:?}");
+            assert_eq!(
+                tr.effects,
+                [Effect::PlayReply(Reply::Ask), Effect::AskUser("yt".into())]
+            );
+        }
+    }
+
+    #[test]
+    fn need_permission_ignored_outside_command_states() {
+        let t0 = now();
+        for state in [State::Idle, State::Executing, State::Paused, asking(t0)] {
+            let tr = transition(state, Event::NeedPermission("yt".into()), t0, T);
+            assert_eq!(tr, Transition::stay(state), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn granted_permission_executes() {
+        let t0 = now();
+        let tr = transition(asking(t0), Event::PermissionGranted("yt".into()), t0, T);
+        assert_eq!(tr.next, State::Executing);
+        assert_eq!(tr.effects, [Effect::CloseAsk, Effect::Execute("yt".into())]);
+    }
+
+    #[test]
+    fn denied_permission_goes_to_follow_up() {
+        let t0 = now();
+        let tr = transition(asking(t0), Event::PermissionDenied, t0, T);
+        assert_eq!(
+            tr.next,
+            State::FollowUp {
+                until: t0 + T.follow_up
+            }
+        );
+        assert_eq!(
+            tr.effects,
+            [Effect::CloseAsk, Effect::PlayReply(Reply::Denied)]
+        );
+    }
+
+    #[test]
+    fn silence_means_no() {
+        let t0 = now();
+        assert_eq!(
+            transition(asking(t0), Event::Tick, t0, T),
+            Transition::stay(asking(t0))
+        );
+        let tr = transition(asking(t0), Event::Tick, t0 + T.ask, T);
+        assert_eq!(tr.next, State::Idle);
+        assert_eq!(
+            tr.effects,
+            [Effect::CloseAsk, Effect::SetTranscribing(false)]
+        );
+    }
+
+    #[test]
+    fn asking_ignores_other_events() {
+        let t0 = now();
+        for event in [
+            Event::WakeWord,
+            cmd("x"),
+            Event::NotUnderstood,
+            Event::ActionFinished { reply: None },
+            Event::Resume,
+        ] {
+            assert_eq!(
+                transition(asking(t0), event.clone(), t0, T),
+                Transition::stay(asking(t0)),
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn late_answers_are_ignored_elsewhere() {
+        let t0 = now();
+        for state in all_states(t0) {
+            for event in [
+                Event::PermissionGranted("x".into()),
+                Event::PermissionDenied,
+            ] {
+                assert_eq!(
+                    transition(state, event.clone(), t0, T),
+                    Transition::stay(state),
+                    "{state:?} {event:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pause_while_asking_closes_window() {
+        let t0 = now();
+        let tr = transition(asking(t0), Event::TogglePause, t0, T);
+        assert_eq!(tr.next, State::Paused);
+        assert_eq!(
+            tr.effects,
+            [
+                Effect::CloseAsk,
+                Effect::SetTranscribing(false),
+                Effect::SetListening(false)
+            ]
+        );
+    }
+
+    #[test]
+    fn emergency_stop_from_everywhere() {
+        let t0 = now();
+        for state in all_states(t0).into_iter().chain([asking(t0)]) {
+            let tr = transition(state, Event::EmergencyStop, t0, T);
+            assert_eq!(tr.next, State::Paused, "{state:?}");
+            let mut expected = match state {
+                State::Paused => vec![Effect::StopAll],
+                _ => vec![
+                    Effect::StopAll,
+                    Effect::SetTranscribing(false),
+                    Effect::SetListening(false),
+                ],
+            };
+            if matches!(state, State::AskingPermission { .. }) {
+                expected.insert(0, Effect::CloseAsk);
+            }
+            assert_eq!(tr.effects, expected, "{state:?}");
+        }
+    }
 
     fn now() -> Instant {
         Instant::now()

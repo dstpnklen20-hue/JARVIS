@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::state::Reply;
 
@@ -48,7 +48,7 @@ fn default_reply() -> String {
 }
 
 /// Действие команды (раздел 6 ТЗ). Этап 2: `say`, `open_url`, `media`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionSpec {
     /// Проиграть ответ из звукового пакета или свой WAV из папки пакета команд.
@@ -66,7 +66,7 @@ pub enum ActionSpec {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaOp {
     PlayPause,

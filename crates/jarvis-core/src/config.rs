@@ -44,6 +44,7 @@ pub struct Config {
     pub speaker: Speaker,
     pub vad: Vad,
     pub voice: Voice,
+    pub hotkeys: Hotkeys,
     pub session: Session,
     pub logging: Logging,
     pub paths: Paths,
@@ -58,6 +59,14 @@ pub struct Wake {
     pub max_edit_distance: usize,
     /// Сколько секунд после «Джарвис» ждать команду.
     pub listen_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hotkeys {
+    /// «Ctrl+Alt+F12»; пусто — без горячей клавиши. Синтаксис проверяет
+    /// платформа при регистрации (там же список клавиш).
+    pub emergency_stop: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

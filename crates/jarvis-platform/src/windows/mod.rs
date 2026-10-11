@@ -1,19 +1,22 @@
 //! Реализация для Windows через `windows-sys`.
 
 mod actions;
+mod dialog;
 mod event_loop;
-
-pub use actions::{MediaKey, media_key, open_url};
+mod hotkey;
 mod instance;
 mod stop;
 mod system;
 
-pub use stop::{StopSignal, create_stop_signal, send_stop_signal};
-
+pub use actions::{MediaKey, media_key, open_url};
+pub use dialog::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 pub use event_loop::{
-    Waker, current_waker, install_ctrl_handler, notify_shutdown_complete, run_message_loop,
+    LoopEvent, Waker, current_waker, install_ctrl_handler, notify_shutdown_complete,
+    run_message_loop,
 };
+pub use hotkey::{HotkeyGuard, parse_hotkey, register_hotkey};
 pub use instance::acquire_single_instance;
+pub use stop::{StopSignal, create_stop_signal, send_stop_signal};
 pub use system::{is_elevated, os_info};
 
 fn last_error(call: &'static str) -> crate::PlatformError {

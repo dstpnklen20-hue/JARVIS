@@ -168,7 +168,11 @@ fn bench_commands(
             .file_stem()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let expected = name.split("__").next().unwrap_or_default().to_owned();
+        let expected = name
+            .split("__")
+            .next()
+            .unwrap_or_default()
+            .replacen("builtin_", "builtin:", 1);
         let samples = wav::read(&file)?.resampled(MODEL_RATE)?.samples;
         let run = run_command(
             &mut stt,

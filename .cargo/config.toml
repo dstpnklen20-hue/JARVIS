@@ -8,5 +8,12 @@ SHERPA_ONNX_ARCHIVE_DIR = { value = "lib/sherpa-onnx", relative = true }
 # sherpa-onnx собрана со статическим рантаймом C (/MT). Rust тоже линкуем
 # статически: два разных рантайма C в одном процессе — разные кучи и
 # предупреждение LNK4098. Заодно jarvis.exe не требует vcruntime*.dll.
+#
+# Манифест с Common Controls v6: без него окно-вопрос о разрешении
+# (TaskDialogIndirect) не загрузится. Вшивается во все exe, включая тестовые.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/MANIFEST:EMBED",
+    "-C", "link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'",
+]

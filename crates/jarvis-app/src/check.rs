@@ -15,6 +15,7 @@ use jarvis_audio::speaker::Voiceprint;
 use jarvis_core::assets::{Asset, AssetStatus, MARKER_FILE, Manifest};
 use jarvis_core::commands::Registry;
 use jarvis_core::config::{DEFAULT_FILE, USER_FILE, resolve};
+use jarvis_core::permissions::{PERMISSIONS_FILE, PermissionStore};
 use jarvis_core::root::{self, project_path};
 use jarvis_core::state::Reply;
 use jarvis_core::{Config, error_chain};
@@ -138,6 +139,24 @@ fn collect(explicit_root: Option<&Path>) -> (String, Vec<Item>) {
         items.push(check_voice_pack(&root, config));
         items.push(check_voiceprint(&root, config));
         items.push(check_commands(&root, config));
+        items.push(check_permissions(&root));
+        items.push(match crate::daemon::check_hotkey(config) {
+            Ok(Some(spec)) => Item::new(
+                Status::Ok,
+                "Аварийная остановка",
+                format!("{spec} и «Джарвис, стоп»"),
+            ),
+            Ok(None) => Item::new(
+                Status::Warn,
+                "Аварийная остановка",
+                "горячая клавиша выключена — только «Джарвис, стоп» и трей",
+            ),
+            Err(e) => Item::new(
+                Status::Fail,
+                "Аварийная остановка",
+                format!("hotkeys.emergency_stop: {e}"),
+            ),
+        });
     }
 
     (header, items)
@@ -227,6 +246,27 @@ fn check_commands(root: &Path, config: &Config) -> Item {
         (false, true, true) => Status::Ok,
     };
     Item::new(status, TITLE, summary).with_notes(notes)
+}
+
+fn check_permissions(root: &Path) -> Item {
+    const TITLE: &str = "Разрешения";
+    let path = project_path(root, PERMISSIONS_FILE);
+    match PermissionStore::load(&path) {
+        Ok(store) if store.remembered() == 0 => Item::new(
+            Status::Ok,
+            TITLE,
+            "пока ни одного — Джарвис спросит перед первой командой",
+        ),
+        Ok(store) => Item::new(
+            Status::Ok,
+            TITLE,
+            format!(
+                "запомнено решений: {} ({PERMISSIONS_FILE})",
+                store.remembered()
+            ),
+        ),
+        Err(e) => Item::new(Status::Fail, TITLE, error_chain(&e)),
+    }
 }
 
 fn check_voiceprint(root: &Path, config: &Config) -> Item {

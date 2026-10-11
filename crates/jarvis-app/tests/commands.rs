@@ -86,7 +86,11 @@ fn every_command_recording_resolves_to_its_command() {
     let mut s = setup();
     for file in fixtures("commands") {
         let name = file.file_stem().unwrap().to_string_lossy().into_owned();
-        let expected = name.split("__").next().unwrap();
+        let expected = name
+            .split("__")
+            .next()
+            .unwrap()
+            .replacen("builtin_", "builtin:", 1);
         let resolution = decide(&mut s, &file);
         if expected.starts_with("unknown") {
             assert!(
@@ -95,7 +99,7 @@ fn every_command_recording_resolves_to_its_command() {
             );
         } else {
             assert!(
-                matches!(&resolution, Resolution::Command { id, .. } if id == expected),
+                matches!(&resolution, Resolution::Command { id, .. } if *id == expected),
                 "{name}: {resolution:?}"
             );
         }
@@ -113,7 +117,7 @@ fn wake_word_and_command_in_one_breath() {
     ] {
         let resolution = decide(&mut s, &root().join("tests/fixtures/wake").join(file));
         assert!(
-            matches!(&resolution, Resolution::Command { id, .. } if id == expected),
+            matches!(&resolution, Resolution::Command { id, .. } if *id == expected),
             "{file}: {resolution:?}"
         );
     }
@@ -149,6 +153,43 @@ fn shared_recognizer_still_detects_wake_word_only_where_said() {
                 run.detections
             );
         }
+    }
+}
+
+#[test]
+#[ignore = "нужны модели: scripts/download-models.ps1"]
+fn spoken_permission_answers_are_understood() {
+    use jarvis_nlu::answers::{PermissionReply, parse_reply};
+    let mut s = setup();
+    for file in fixtures("answers") {
+        let name = file.file_stem().unwrap().to_string_lossy().into_owned();
+        let expected = match name.split("__").next().unwrap() {
+            "yes" => PermissionReply::Yes,
+            "always" => PermissionReply::Always,
+            "no" => PermissionReply::No,
+            "never" => PermissionReply::Never,
+            other => panic!("неизвестный ответ в имени файла: {other}"),
+        };
+        let samples = wav::read(&file)
+            .unwrap()
+            .resampled(MODEL_RATE)
+            .unwrap()
+            .samples;
+        // Итоговый текст фразы — как его получит ядро.
+        let stable = Duration::from_millis(u64::from(s.config.nlu.early_stable_ms));
+        let run = run_command(
+            &mut s.stt,
+            &s.resolver,
+            s.config.nlu.early_score,
+            stable,
+            &samples,
+        );
+        assert_eq!(
+            parse_reply(&run.text),
+            Some(expected),
+            "{name}: «{}»",
+            run.text
+        );
     }
 }
 

@@ -41,13 +41,38 @@ pub struct CommandResolver {
 /// Сходство, при котором частичный текст считается точной фразой команды.
 const EXACT_SCORE: f32 = 0.99;
 
+/// Встроенные команды Джарвиса. Двоеточие в id запрещено в манифестах —
+/// пакет команд не может подменить встроенную команду.
+pub const BUILTIN_STOP: &str = "builtin:stop";
+pub const BUILTIN_FORGET_PERMISSIONS: &str = "builtin:forget_permissions";
+
+const BUILTINS: &[(&str, &[&str])] = &[
+    (
+        BUILTIN_STOP,
+        &["стоп", "стой", "хватит", "замолчи", "отбой", "остановись"],
+    ),
+    (
+        BUILTIN_FORGET_PERMISSIONS,
+        &[
+            "забудь разрешения",
+            "сбрось разрешения",
+            "забудь все разрешения",
+        ],
+    ),
+];
+
+pub fn is_builtin(id: &str) -> bool {
+    id.starts_with("builtin:")
+}
+
 impl CommandResolver {
     pub fn new(registry: &Registry, wake: WakeMatcher, nlu: &Nlu) -> Self {
-        let phrases: Vec<Vec<&str>> = registry
-            .commands
-            .iter()
-            .map(|c| c.phrases.iter().map(String::as_str).collect())
-            .collect();
+        let mut phrases: Vec<Vec<&str>> = BUILTINS.iter().map(|(_, p)| p.to_vec()).collect();
+        let mut ids: Vec<String> = BUILTINS.iter().map(|(id, _)| (*id).to_owned()).collect();
+        for command in &registry.commands {
+            phrases.push(command.phrases.iter().map(String::as_str).collect());
+            ids.push(command.id.clone());
+        }
         let thresholds = Thresholds {
             min_score: nlu.min_score,
             ambiguity_margin: nlu.ambiguity_margin,
@@ -55,7 +80,7 @@ impl CommandResolver {
         Self {
             matcher: CommandMatcher::new(&phrases, thresholds),
             wake,
-            ids: registry.commands.iter().map(|c| c.id.clone()).collect(),
+            ids,
             prefix_min_ratio: nlu.prefix_min_ratio,
         }
     }
@@ -112,12 +137,16 @@ impl CommandResolver {
 /// Только кириллица — латиницы в словаре русской модели нет, и sherpa-onnx
 /// не смог бы закодировать такую подсказку.
 pub fn hotword_phrases(registry: &Registry, wake_words: &[String]) -> Vec<String> {
+    let builtin = BUILTINS
+        .iter()
+        .flat_map(|(_, p)| p.iter().map(|s| (*s).to_owned()));
     let mut phrases: Vec<String> = registry
         .commands
         .iter()
-        .flat_map(|c| c.phrases.iter())
-        .chain(wake_words)
-        .map(|p| normalize_words(p).join(" "))
+        .flat_map(|c| c.phrases.iter().cloned())
+        .chain(wake_words.iter().cloned())
+        .chain(builtin)
+        .map(|p| normalize_words(&p).join(" "))
         .filter(|p| {
             !p.is_empty()
                 && p.chars()
@@ -311,6 +340,15 @@ mod tests {
         assert_eq!(id("сделай громче"), "media_volume_up");
         assert_eq!(id("тише"), "media_volume_down");
         assert_eq!(id("выключи звук"), "media_mute");
+    }
+
+    #[test]
+    fn builtin_commands_resolve() {
+        assert_eq!(id("джарвис стоп"), BUILTIN_STOP);
+        assert_eq!(id("хватит"), BUILTIN_STOP);
+        assert_eq!(id("забудь разрешения"), BUILTIN_FORGET_PERMISSIONS);
+        assert!(is_builtin(BUILTIN_STOP));
+        assert!(!is_builtin("open_youtube"));
     }
 
     #[test]

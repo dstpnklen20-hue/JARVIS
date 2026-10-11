@@ -1,4 +1,4 @@
-//! Значок в трее: индикатор состояния и меню «Пауза» / «Выход».
+//! Значок в трее: индикатор состояния и меню «Пауза» / «Забыть разрешения» / «Выход».
 //!
 //! Работает в главном потоке, где крутится цикл сообщений Windows.
 
@@ -15,6 +15,8 @@ pub enum Indicator {
     Idle,
     /// Слушает команду.
     Listening,
+    /// Ждёт ответа на вопрос-разрешение.
+    Asking,
     Paused,
     /// Слух не работает (нет микрофона, не загрузились модели).
     Problem(String),
@@ -26,6 +28,7 @@ impl Indicator {
             Indicator::Starting => [0xE0, 0xA0, 0x20],
             Indicator::Idle => [0x2E, 0xB8, 0x5C],
             Indicator::Listening => [0x2F, 0x80, 0xED],
+            Indicator::Asking => [0x9B, 0x51, 0xE0],
             Indicator::Paused => [0x8A, 0x8F, 0x98],
             Indicator::Problem(_) => [0xE0, 0x3E, 0x3E],
         }
@@ -36,6 +39,7 @@ impl Indicator {
             Indicator::Starting => "загружаюсь…".to_owned(),
             Indicator::Idle => "жду «Джарвис»".to_owned(),
             Indicator::Listening => "слушаю, сэр".to_owned(),
+            Indicator::Asking => "жду вашего решения".to_owned(),
             Indicator::Paused => "на паузе".to_owned(),
             Indicator::Problem(why) => format!("не слышу: {why}"),
         };
@@ -49,12 +53,14 @@ impl Indicator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     TogglePause,
+    ForgetPermissions,
     Quit,
 }
 
 pub struct Tray {
     icon: TrayIcon,
     pause: CheckMenuItem,
+    forget: MenuItem,
     quit: MenuItem,
     shown: Indicator,
 }
@@ -62,9 +68,10 @@ pub struct Tray {
 impl Tray {
     pub fn new() -> anyhow::Result<Self> {
         let pause = CheckMenuItem::new("Пауза", true, false, None);
+        let forget = MenuItem::new("Забыть разрешения", true, None);
         let quit = MenuItem::new("Выход", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&pause, &PredefinedMenuItem::separator(), &quit])
+        menu.append_items(&[&pause, &forget, &PredefinedMenuItem::separator(), &quit])
             .context("не удалось создать меню трея")?;
         let shown = Indicator::Starting;
         let icon = TrayIconBuilder::new()
@@ -76,6 +83,7 @@ impl Tray {
         Ok(Self {
             icon,
             pause,
+            forget,
             quit,
             shown,
         })
@@ -102,6 +110,8 @@ impl Tray {
         let event = MenuEvent::receiver().try_recv().ok()?;
         if event.id == *self.pause.id() {
             Some(MenuAction::TogglePause)
+        } else if event.id == *self.forget.id() {
+            Some(MenuAction::ForgetPermissions)
         } else if event.id == *self.quit.id() {
             Some(MenuAction::Quit)
         } else {
@@ -160,6 +170,7 @@ mod tests {
             Indicator::Starting.color(),
             Indicator::Idle.color(),
             Indicator::Listening.color(),
+            Indicator::Asking.color(),
             Indicator::Paused.color(),
             Indicator::Problem(String::new()).color(),
         ];
