@@ -1,58 +1,69 @@
 {
   "assets": [
     {
-      "id": "vosk-lib",
-      "name": "libvosk 0.3.45",
-      "description": "движок распознавания речи, Windows x64 (последняя сборка под Windows)",
-      "url": "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-win64-0.3.45.zip",
-      "sha256": "f1dcc9cca460630f81ea8f71794f69c80bed6556d2a4e6237b5785e1d2dff34b",
-      "size": 14882445,
+      "id": "sherpa-onnx-lib",
+      "name": "sherpa-onnx 1.13.8",
+      "description": "нативная библиотека распознавания речи для сборки (Windows x64, static MT)",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-win-x64-static-MT-Release-lib.tar.bz2",
+      "sha256": "56ffcf3c454c1f14f7bc9887286cc8143e7e542dc632804e1c447d5f8d534eaf",
+      "size": 123206268,
+      "kind": "file",
       "base": "native_libs",
-      "dir": "vosk-win64-0.3.45",
+      "dir": "sherpa-onnx",
       "required": true,
-      "files": [
-        "libvosk.dll",
-        "libvosk.lib",
-        "libgcc_s_seh-1.dll",
-        "libstdc++-6.dll",
-        "libwinpthread-1.dll"
-      ]
+      "files": ["sherpa-onnx-v1.13.8-win-x64-static-MT-Release-lib.tar.bz2"]
     },
     {
-      "id": "vosk-model-small-ru",
-      "name": "Vosk small-ru 0.22",
-      "description": "русская модель для команд, поддерживает грамматику",
-      "url": "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
-      "sha256": "961d5ff98a17f4aa6de69864d0aa71fa5bac682301d2b5d17a3f24c5c99a46d4",
-      "size": 46236750,
+      "id": "asr-zipformer-small-ru",
+      "name": "Zipformer small-ru",
+      "description": "потоковая русская модель (Vosk, 2025): «Джарвис» и команды",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-small-ru-vosk-int8-2025-08-16.tar.bz2",
+      "sha256": "6ba68a01ff3c5445aaf2d61e9b97b026f1149dcc9049d11af3f44f55176341d8",
+      "size": 24110855,
+      "kind": "archive",
       "base": "models",
-      "dir": "vosk-model-small-ru-0.22",
+      "dir": "sherpa-onnx-streaming-zipformer-small-ru-vosk-int8-2025-08-16",
       "required": true,
-      "files": [
-        "am/final.mdl",
-        "conf/model.conf",
-        "conf/mfcc.conf",
-        "graph/HCLr.fst",
-        "graph/Gr.fst",
-        "ivector/final.ie"
-      ]
+      "files": ["encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt", "bpe.model"]
     },
     {
-      "id": "vosk-model-ru",
-      "name": "Vosk ru 0.42",
-      "description": "полная русская модель для свободной речи (этап 7)",
-      "url": "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip",
-      "sha256": "00eb9e5ed8230492da1acf702cd3548e1282256a5fdde8f188253e77217e9429",
-      "size": 1937602113,
+      "id": "vad-silero",
+      "name": "Silero VAD",
+      "description": "детектор речи: начало и конец фразы",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+      "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+      "size": 643854,
+      "kind": "file",
       "base": "models",
-      "dir": "vosk-model-ru-0.42",
+      "dir": "silero-vad",
+      "required": true,
+      "files": ["silero_vad.onnx"]
+    },
+    {
+      "id": "vad-ten",
+      "name": "TEN VAD",
+      "description": "альтернативный детектор речи (vad.engine = \"ten\")",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx",
+      "sha256": "718cb7eef47e3cf5ddbe7e967a7503f46b8b469c0706872f494dfa921b486206",
+      "size": 332211,
+      "kind": "file",
+      "base": "models",
+      "dir": "ten-vad",
       "required": false,
-      "files": [
-        "am/final.mdl",
-        "conf/model.conf",
-        "graph/HCLG.fst",
-        "ivector/final.ie"
-      ]
+      "files": ["ten-vad.onnx"]
+    },
+    {
+      "id": "speaker-campplus",
+      "name": "CAM++ speaker",
+      "description": "распознавание говорящего: Джарвис откликается только на ваш голос",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+      "sha256": "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
+      "size": 28281164,
+      "kind": "file",
+      "base": "models",
+      "dir": "speaker-campplus",
+      "required": true,
+      "files": ["3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"]
     }
   ]
 }

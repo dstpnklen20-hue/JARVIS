@@ -1,0 +1,12 @@
+# Нативная библиотека sherpa-onnx берётся из архива, который скачал и проверил
+# по SHA-256 scripts/download-models.ps1, а не скачивается сборкой без проверки.
+# Если сборка пишет «SHERPA_ONNX_ARCHIVE_DIR does not contain expected archive» —
+# запустите скрипт.
+[env]
+SHERPA_ONNX_ARCHIVE_DIR = { value = "lib/sherpa-onnx", relative = true }
+
+# sherpa-onnx собрана со статическим рантаймом C (/MT). Rust тоже линкуем
+# статически: два разных рантайма C в одном процессе — разные кучи и
+# предупреждение LNK4098. Заодно jarvis.exe не требует vcruntime*.dll.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

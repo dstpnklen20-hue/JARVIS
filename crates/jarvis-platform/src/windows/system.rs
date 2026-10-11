@@ -1,8 +1,8 @@
-//! Реализация для Windows через `windows-sys`.
+//! Сведения о системе: версия ОС, права администратора.
 
 use std::ffi::c_void;
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
@@ -11,6 +11,7 @@ use windows_sys::Win32::System::Registry::{
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+use super::{OwnedHandle, last_error, wide};
 use crate::{OsInfo, PlatformError, fix_product_name};
 
 const CURRENT_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
@@ -54,23 +55,6 @@ pub fn is_elevated() -> Result<bool, PlatformError> {
         return Err(last_error("GetTokenInformation"));
     }
     Ok(elevation.TokenIsElevated != 0)
-}
-
-/// Дескриптор, который закрывается при выходе из области видимости.
-struct OwnedHandle(HANDLE);
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        // SAFETY: дескриптор получен от OpenProcessToken, принадлежит только
-        // этой структуре и закрывается ровно один раз.
-        unsafe {
-            CloseHandle(self.0);
-        }
-    }
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn read_reg_string(key: &str, value: &str) -> Result<String, PlatformError> {
@@ -150,13 +134,4 @@ fn read_reg_dword(key: &str, value: &str) -> Result<u32, PlatformError> {
         });
     }
     Ok(data)
-}
-
-fn last_error(call: &'static str) -> PlatformError {
-    PlatformError::Win32 {
-        call,
-        code: std::io::Error::last_os_error()
-            .raw_os_error()
-            .map_or(0, |c| c as u32),
-    }
 }

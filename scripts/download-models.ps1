@@ -7,11 +7,16 @@
     (его же читает `jarvis --check`). Для каждого ресурса скрипт:
       1. скачивает архив с докачкой при обрыве (curl.exe);
       2. проверяет размер и SHA-256 — при несовпадении удаляет файл и падает;
-      3. распаковывает (tar.exe) и кладёт метку .jarvis-verified с хешем.
+      3. распаковывает архив (tar.exe) или кладёт файл как есть и пишет
+         метку .jarvis-verified с хешем.
     Уже установленные ресурсы с верной меткой пропускаются.
 
+    Среди ресурсов — архив нативной библиотеки sherpa-onnx: сборка берёт его
+    отсюда (SHERPA_ONNX_ARCHIVE_DIR в .cargo/config.toml), а не качает сама
+    без проверки. Поэтому скрипт нужно запустить до первой `cargo build`.
+
 .PARAMETER Full
-    Также скачать необязательные ресурсы (полная модель Vosk, ~1.9 ГБ).
+    Также скачать необязательные ресурсы (см. "required": false в assets.json).
 
 .PARAMETER Force
     Переустановить ресурсы, даже если они уже на месте.
@@ -96,7 +101,7 @@ foreach ($asset in $manifest.assets) {
     }
 
     try {
-        $fileName = [System.IO.Path]::GetFileName(([uri]$asset.url).AbsolutePath)
+        $fileName = [uri]::UnescapeDataString([System.IO.Path]::GetFileName(([uri]$asset.url).AbsolutePath))
         $archive = Join-Path $archives $fileName
 
         $haveGood = (Test-Path -LiteralPath $archive) -and
@@ -126,16 +131,23 @@ foreach ($asset in $manifest.assets) {
             }
         }
 
-        Write-Host "[....] $($asset.name): распаковываю"
         $staging = Join-Path $base ".extract-$($asset.id)"
         if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
         New-Item -ItemType Directory -Force -Path $staging | Out-Null
-        & tar.exe -xf $archive -C $staging
-        if ($LASTEXITCODE -ne 0) { throw "tar завершился с кодом $LASTEXITCODE" }
-
         $extracted = Join-Path $staging $asset.dir
-        if (-not (Test-Path -LiteralPath $extracted -PathType Container)) {
-            throw "в архиве нет папки $($asset.dir)"
+
+        if ($asset.kind -eq 'archive') {
+            Write-Host "[....] $($asset.name): распаковываю"
+            & tar.exe -xf $archive -C $staging
+            if ($LASTEXITCODE -ne 0) { throw "tar завершился с кодом $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $extracted -PathType Container)) {
+                throw "в архиве нет папки $($asset.dir)"
+            }
+        } elseif ($asset.kind -eq 'file') {
+            New-Item -ItemType Directory -Force -Path $extracted | Out-Null
+            Copy-Item -LiteralPath $archive -Destination (Join-Path $extracted $asset.files[0])
+        } else {
+            throw "assets.json: неизвестный kind '$($asset.kind)'"
         }
         foreach ($f in $asset.files) {
             if (-not (Test-Path -LiteralPath (Join-Path $extracted $f) -PathType Leaf)) {

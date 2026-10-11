@@ -26,15 +26,86 @@ pub const SYSTEM_DEFAULT_DEVICE: &str = "default";
 
 pub const FOLLOW_UP_SECS_RANGE: std::ops::RangeInclusive<u32> = 3..=60;
 pub const LOG_MAX_FILES_RANGE: std::ops::RangeInclusive<usize> = 1..=365;
+pub const LISTEN_SECS_RANGE: std::ops::RangeInclusive<u32> = 2..=30;
+pub const MAX_EDIT_DISTANCE: usize = 2;
+pub const VOLUME_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub general: General,
     pub audio: Audio,
+    pub wake: Wake,
+    pub speaker: Speaker,
+    pub vad: Vad,
+    pub voice: Voice,
     pub session: Session,
     pub logging: Logging,
     pub paths: Paths,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wake {
+    /// Слова активации в том виде, как их пишет распознаватель.
+    pub words: Vec<String>,
+    /// Допустимое расстояние Левенштейна до слова активации.
+    pub max_edit_distance: usize,
+    /// Сколько секунд после «Джарвис» ждать команду.
+    pub listen_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Speaker {
+    pub verify: bool,
+    pub threshold: SpeakerThreshold,
+}
+
+/// Порог сходства голоса: подобранный при `--enroll` или заданный вручную.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpeakerThreshold {
+    Auto,
+    Fixed(f32),
+}
+
+impl<'de> Deserialize<'de> for SpeakerThreshold {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Number(f64),
+            Text(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Number(n) => Ok(Self::Fixed(n as f32)),
+            Raw::Text(s) if s == "auto" => Ok(Self::Auto),
+            Raw::Text(s) => Err(serde::de::Error::custom(format!(
+                "ожидалось \"auto\" или число 0–1, получено \"{s}\""
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VadEngine {
+    Silero,
+    Ten,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vad {
+    pub engine: VadEngine,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Voice {
+    /// Папка звукового пакета внутри `paths.sounds`.
+    pub pack: String,
+    pub volume: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -84,6 +155,7 @@ pub struct Paths {
     pub native_libs: PathBuf,
     pub commands: PathBuf,
     pub sounds: PathBuf,
+    pub data: PathBuf,
 }
 
 /// Одна найденная проблема в значениях конфига.
@@ -192,6 +264,49 @@ impl Config {
             format!("пустое имя; для системного микрофона укажите \"{SYSTEM_DEFAULT_DEVICE}\""),
         );
         check(
+            !self.wake.words.is_empty(),
+            "wake.words",
+            "нужно хотя бы одно слово активации".into(),
+        );
+        check(
+            self.wake
+                .words
+                .iter()
+                .all(|w| w.trim().chars().count() >= 3),
+            "wake.words",
+            "слово активации должно быть не короче 3 букв".into(),
+        );
+        check(
+            self.wake.max_edit_distance <= MAX_EDIT_DISTANCE,
+            "wake.max_edit_distance",
+            format!(
+                "{} больше допустимого {MAX_EDIT_DISTANCE}",
+                self.wake.max_edit_distance
+            ),
+        );
+        check(
+            LISTEN_SECS_RANGE.contains(&self.wake.listen_secs),
+            "wake.listen_secs",
+            out_of_range(self.wake.listen_secs, &LISTEN_SECS_RANGE),
+        );
+        if let SpeakerThreshold::Fixed(t) = self.speaker.threshold {
+            check(
+                (0.0..=1.0).contains(&t),
+                "speaker.threshold",
+                format!("{t} вне диапазона 0–1"),
+            );
+        }
+        check(
+            !self.voice.pack.trim().is_empty(),
+            "voice.pack",
+            "имя звукового пакета не может быть пустым".into(),
+        );
+        check(
+            VOLUME_RANGE.contains(&self.voice.volume),
+            "voice.volume",
+            out_of_range(self.voice.volume, &VOLUME_RANGE),
+        );
+        check(
             FOLLOW_UP_SECS_RANGE.contains(&self.session.follow_up_secs),
             "session.follow_up_secs",
             format!(
@@ -220,6 +335,7 @@ impl Config {
             ("paths.native_libs", &self.paths.native_libs),
             ("paths.commands", &self.paths.commands),
             ("paths.sounds", &self.paths.sounds),
+            ("paths.data", &self.paths.data),
         ] {
             check(
                 !path.as_os_str().is_empty(),
@@ -234,6 +350,14 @@ impl Config {
             Err(problems)
         }
     }
+}
+
+fn out_of_range<T: fmt::Display>(value: T, range: &std::ops::RangeInclusive<T>) -> String {
+    format!(
+        "{value} вне допустимого диапазона {}–{}",
+        range.start(),
+        range.end()
+    )
 }
 
 /// Абсолютный путь для значения из конфига: относительные — от корня проекта.
@@ -409,5 +533,63 @@ mod tests {
     fn default_device_keyword_is_case_insensitive() {
         let config = load(Some("[audio]\ninput_device = \" Default \"\n")).unwrap();
         assert_eq!(config.audio.input_device_name(), None);
+    }
+
+    #[test]
+    fn speaker_threshold_accepts_auto_and_numbers() {
+        assert_eq!(
+            load(None).unwrap().speaker.threshold,
+            SpeakerThreshold::Auto
+        );
+        let config = load(Some("[speaker]\nthreshold = 0.55\n")).unwrap();
+        assert_eq!(config.speaker.threshold, SpeakerThreshold::Fixed(0.55));
+        // Целое число в TOML — тоже число.
+        let config = load(Some("[speaker]\nthreshold = 1\n")).unwrap();
+        assert_eq!(config.speaker.threshold, SpeakerThreshold::Fixed(1.0));
+    }
+
+    #[test]
+    fn speaker_threshold_rejects_bad_values() {
+        let err = load(Some("[speaker]\nthreshold = \"авто\"\n")).unwrap_err();
+        assert!(crate::error_chain(&err).contains("auto"), "{err}");
+        let err = load(Some("[speaker]\nthreshold = 1.5\n")).unwrap_err();
+        assert!(
+            crate::error_chain(&err).contains("speaker.threshold"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn wake_and_voice_values_are_validated() {
+        let err = load(Some(
+            "[wake]\nwords = []\nmax_edit_distance = 3\nlisten_secs = 1\n[voice]\nvolume = 3.0\npack = \"\"\n",
+        ))
+        .unwrap_err();
+        let ConfigError::Invalid(problems) = err else {
+            panic!("ожидали Invalid, получили {err:?}");
+        };
+        let keys: Vec<_> = problems.iter().map(|p| p.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "wake.words",
+                "wake.max_edit_distance",
+                "wake.listen_secs",
+                "voice.pack",
+                "voice.volume"
+            ]
+        );
+    }
+
+    #[test]
+    fn wake_words_are_replaced_not_merged() {
+        let config = load(Some("[wake]\nwords = [\"пятница\"]\n")).unwrap();
+        assert_eq!(config.wake.words, ["пятница"]);
+    }
+
+    #[test]
+    fn unknown_vad_engine_is_rejected() {
+        let err = load(Some("[vad]\nengine = \"webrtc\"\n")).unwrap_err();
+        assert!(crate::error_chain(&err).contains("webrtc"), "{err}");
     }
 }

@@ -13,6 +13,27 @@ mod unsupported;
 #[cfg(not(windows))]
 use unsupported as imp;
 
+/// Цикл сообщений главного потока и обработка Ctrl+C / закрытия консоли.
+#[cfg(windows)]
+pub use windows::{
+    Waker, current_waker, install_ctrl_handler, notify_shutdown_complete, run_message_loop,
+};
+
+/// Мягкая остановка работающей копии извне (`jarvis --stop`).
+#[cfg(windows)]
+pub use windows::{StopSignal, create_stop_signal, send_stop_signal};
+
+/// Пока жив, вторая копия программы не запустится.
+pub struct InstanceGuard {
+    _handle: Box<dyn Send>,
+}
+
+/// Захватывает «право быть единственной копией» с именем `name`.
+/// `Ok(None)` — другая копия уже запущена.
+pub fn acquire_single_instance(name: &str) -> Result<Option<InstanceGuard>, PlatformError> {
+    imp::acquire_single_instance(name)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
     #[error("{call} завершился с ошибкой Win32 {code}")]
@@ -105,5 +126,46 @@ mod tests {
     #[test]
     fn elevation_check_does_not_fail() {
         is_elevated().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_instance_is_detected() {
+        let name = format!("JarvisTest-{}", std::process::id());
+        let first = acquire_single_instance(&name).unwrap();
+        assert!(first.is_some());
+        assert!(acquire_single_instance(&name).unwrap().is_none());
+        drop(first);
+        // После освобождения можно снова.
+        assert!(acquire_single_instance(&name).unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stop_signal_reaches_waiting_thread() {
+        let name = format!("JarvisStopTest-{}", std::process::id());
+        assert!(!send_stop_signal(&name).unwrap(), "без получателя — false");
+        let signal = create_stop_signal(&name).unwrap();
+        let waiter = std::thread::spawn(move || signal.wait());
+        assert!(send_stop_signal(&name).unwrap());
+        waiter.join().unwrap().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn waker_from_other_thread_ends_loop() {
+        let waker = current_waker();
+        let mut ticks = 0;
+        std::thread::spawn(move || {
+            waker.wake();
+            waker.quit();
+        });
+        run_message_loop(std::time::Duration::from_secs(5), || {
+            ticks += 1;
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+        // Пробуждение вызвало обработчик, quit завершил цикл.
+        assert!(ticks >= 1);
     }
 }

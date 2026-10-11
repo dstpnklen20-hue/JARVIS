@@ -8,9 +8,14 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use cpal::traits::{DeviceTrait as _, HostTrait as _};
+use jarvis_audio::capture::Capture;
+use jarvis_audio::models::SpeechModels;
+use jarvis_audio::pack::VoicePack;
+use jarvis_audio::speaker::Voiceprint;
 use jarvis_core::assets::{Asset, AssetStatus, MARKER_FILE, Manifest};
-use jarvis_core::config::{DEFAULT_FILE, USER_FILE};
+use jarvis_core::config::{DEFAULT_FILE, USER_FILE, resolve};
 use jarvis_core::root::{self, project_path};
+use jarvis_core::state::Reply;
 use jarvis_core::{Config, error_chain};
 use jarvis_platform::{MIN_SUPPORTED_BUILD, OsInfo};
 
@@ -107,6 +112,9 @@ fn collect(explicit_root: Option<&Path>) -> (String, Vec<Item>) {
     };
 
     items.push(check_microphone(config.as_ref()));
+    if let Some(config) = &config {
+        items.push(check_signal(config));
+    }
 
     match (Manifest::load(&root), &config) {
         (Ok(manifest), Some(config)) => {
@@ -123,6 +131,11 @@ fn collect(explicit_root: Option<&Path>) -> (String, Vec<Item>) {
             "Ресурсы",
             "не проверены: сначала исправьте конфиг",
         )),
+    }
+
+    if let Some(config) = &config {
+        items.push(check_voice_pack(&root, config));
+        items.push(check_voiceprint(&root, config));
     }
 
     (header, items)
@@ -165,6 +178,53 @@ fn check_asset(asset: &Asset, root: &Path, config: &Config) -> Item {
         other => other,
     };
     Item::new(status, &asset.name, detail)
+}
+
+fn check_voice_pack(root: &Path, config: &Config) -> Item {
+    const TITLE: &str = "Звуковой пакет";
+    let dir = resolve(root, &config.paths.sounds).join(&config.voice.pack);
+    match VoicePack::load(&dir) {
+        Ok(pack) => {
+            let replies: Vec<String> = Reply::ALL
+                .iter()
+                .map(|r| format!("{} ×{}", r.key(), pack.variants(*r).len()))
+                .collect();
+            Item::new(
+                Status::Ok,
+                TITLE,
+                format!("{}: {}", pack.name, replies.join(", ")),
+            )
+        }
+        Err(e) => Item::new(Status::Fail, TITLE, error_chain(&e)),
+    }
+}
+
+fn check_voiceprint(root: &Path, config: &Config) -> Item {
+    const TITLE: &str = "Образец голоса";
+    if !config.speaker.verify {
+        return Item::new(
+            Status::Skip,
+            TITLE,
+            "проверка голоса выключена (speaker.verify)",
+        );
+    }
+    let models = match SpeechModels::locate(root, config) {
+        Ok(m) => m,
+        Err(_) => return Item::new(Status::Skip, TITLE, "не проверен: нет моделей"),
+    };
+    match Voiceprint::load(&crate::hearing::data_dir(root, config), &models.speaker) {
+        Ok(Some(print)) => Item::new(
+            Status::Ok,
+            TITLE,
+            format!("{} образцов, порог {:.2}", print.samples, print.threshold),
+        ),
+        Ok(None) => Item::new(
+            Status::Warn,
+            TITLE,
+            "не записан — Джарвис откликнется на любой голос; запишите свой: jarvis --enroll",
+        ),
+        Err(e) => Item::new(Status::Fail, TITLE, error_chain(&e)),
+    }
 }
 
 fn check_os() -> Item {
@@ -247,6 +307,50 @@ fn check_microphone(config: Option<&Config>) -> Item {
         ),
     }
     .with_notes(notes)
+}
+
+/// Короткая запись с микрофона: доходит ли звук вообще.
+fn check_signal(config: &Config) -> Item {
+    const TITLE: &str = "Сигнал";
+    let mut capture = match Capture::open(config.audio.input_device_name()) {
+        Ok(c) => c,
+        Err(e) => return Item::new(Status::Fail, TITLE, error_chain(&e)),
+    };
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let mut buf = vec![0.0f32; capture.available().max(1)];
+    let n = capture.read(&mut buf);
+    let peak = buf[..n].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    signal_item(n, peak)
+}
+
+fn signal_item(samples: usize, peak: f32) -> Item {
+    const TITLE: &str = "Сигнал";
+    let db = 20.0 * peak.max(1e-6).log10();
+    if samples == 0 {
+        Item::new(Status::Fail, TITLE, "микрофон открыт, но не присылает звук")
+    } else if peak < 1e-5 {
+        // Даже тихая комната даёт шум около −70…−50 dBFS; меньше −100 —
+        // цифровая тишина: микрофон выключен на устройстве или в драйвере.
+        Item::new(
+            Status::Warn,
+            TITLE,
+            format!(
+                "цифровая тишина ({db:.0} dBFS) — микрофон выключен кнопкой на устройстве или в драйвере"
+            ),
+        )
+    } else if db < -70.0 {
+        Item::new(
+            Status::Warn,
+            TITLE,
+            format!("очень тихо ({db:.0} dBFS) — проверьте громкость микрофона в Windows"),
+        )
+    } else {
+        Item::new(
+            Status::Ok,
+            TITLE,
+            format!("есть, пик {db:.0} dBFS за 0.6 с"),
+        )
+    }
 }
 
 /// Первое устройство, имя которого содержит `part` без учёта регистра.
@@ -347,6 +451,14 @@ mod tests {
             text.ends_with("Итог: ошибок — 1, предупреждений — 1.\n"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn signal_levels_are_classified() {
+        assert_eq!(signal_item(0, 0.0).status, Status::Fail);
+        assert_eq!(signal_item(100, 0.0).status, Status::Warn);
+        assert_eq!(signal_item(100, 0.0001).status, Status::Warn);
+        assert_eq!(signal_item(100, 0.05).status, Status::Ok);
     }
 
     #[test]

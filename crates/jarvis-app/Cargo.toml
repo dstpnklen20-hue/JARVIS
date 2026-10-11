@@ -11,12 +11,15 @@ name = "jarvis"
 path = "src/main.rs"
 
 [dependencies]
+jarvis-audio.workspace = true
 jarvis-core.workspace = true
 jarvis-platform.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
 cpal.workspace = true
+sherpa-onnx.workspace = true
+tray-icon.workspace = true
 tracing.workspace = true
 
 [lints]

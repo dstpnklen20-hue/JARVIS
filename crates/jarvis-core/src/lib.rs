@@ -7,6 +7,7 @@ pub mod assets;
 pub mod config;
 pub mod logging;
 pub mod root;
+pub mod state;
 
 pub use config::Config;
 

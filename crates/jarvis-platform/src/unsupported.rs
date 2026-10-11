@@ -9,3 +9,7 @@ pub fn os_info() -> Result<OsInfo, PlatformError> {
 pub fn is_elevated() -> Result<bool, PlatformError> {
     Err(PlatformError::Unsupported)
 }
+
+pub fn acquire_single_instance(_name: &str) -> Result<Option<crate::InstanceGuard>, PlatformError> {
+    Err(PlatformError::Unsupported)
+}

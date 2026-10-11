@@ -36,6 +36,8 @@ pub struct Asset {
     pub url: String,
     pub sha256: String,
     pub size: u64,
+    /// Архив распаковывается, файл кладётся как есть.
+    pub kind: AssetKind,
     /// В какую папку из `[paths]` конфига распаковывать.
     pub base: AssetBase,
     /// Папка верхнего уровня внутри архива.
@@ -44,6 +46,15 @@ pub struct Asset {
     pub required: bool,
     /// Файлы, наличие которых проверяет `--check` (пути внутри `dir`).
     pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKind {
+    /// Архив (`.zip`, `.tar.bz2`) с папкой `dir` верхнего уровня внутри.
+    Archive,
+    /// Одиночный файл: кладётся в папку `dir` под именем из `files[0]`.
+    File,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -80,6 +91,10 @@ pub enum ManifestError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("в {MANIFEST_FILE} нет ресурса `{0}`")]
+    UnknownAsset(String),
+    #[error("{name} не установлен ({status:?}) — запустите scripts\\download-models.ps1")]
+    NotInstalled { name: String, status: AssetStatus },
 }
 
 impl Manifest {
@@ -93,7 +108,29 @@ impl Manifest {
     }
 }
 
+impl Manifest {
+    /// Ресурс по `id` из `assets.json`.
+    pub fn get(&self, id: &str) -> Result<&Asset, ManifestError> {
+        self.assets
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| ManifestError::UnknownAsset(id.to_owned()))
+    }
+}
+
 impl Asset {
+    /// Путь к файлу ресурса, проверив, что ресурс установлен целиком.
+    pub fn file(&self, root: &Path, config: &Config, name: &str) -> Result<PathBuf, ManifestError> {
+        let location = self.location(root, config);
+        match self.status(&location) {
+            AssetStatus::Ok => Ok(location.join(name)),
+            status => Err(ManifestError::NotInstalled {
+                name: self.name.clone(),
+                status,
+            }),
+        }
+    }
+
     /// Абсолютный путь к распакованной папке ресурса.
     pub fn location(&self, root: &Path, config: &Config) -> PathBuf {
         let base = match self.base {
@@ -135,6 +172,7 @@ mod tests {
             url: "https://example.com/a.zip".into(),
             sha256: "ABCDEF".into(),
             size: 1,
+            kind: AssetKind::Archive,
             base: AssetBase::Models,
             dir: "a".into(),
             required: true,
@@ -156,7 +194,12 @@ mod tests {
             assert!(a.sha256.chars().all(|c| c.is_ascii_hexdigit()), "{}", a.id);
             assert!(a.url.starts_with("https://"), "{}", a.id);
             assert!(!a.files.is_empty(), "{}", a.id);
+            if a.kind == AssetKind::File {
+                assert_eq!(a.files.len(), 1, "{}: у файла ровно одно имя", a.id);
+            }
         }
+        let ids: std::collections::HashSet<_> = manifest.assets.iter().map(|a| &a.id).collect();
+        assert_eq!(ids.len(), manifest.assets.len(), "id ресурсов не уникальны");
     }
 
     #[test]
