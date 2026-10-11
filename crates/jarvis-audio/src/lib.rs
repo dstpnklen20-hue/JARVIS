@@ -5,7 +5,9 @@
 
 pub mod asr;
 pub mod bench;
+pub mod bpe;
 pub mod capture;
+pub mod engines;
 mod error;
 pub mod models;
 pub mod pack;
@@ -13,6 +15,7 @@ pub mod pipeline;
 pub mod player;
 pub mod resample;
 pub mod speaker;
+pub mod stt;
 pub mod vad;
 pub mod wake;
 pub mod wav;

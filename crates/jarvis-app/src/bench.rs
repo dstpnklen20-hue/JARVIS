@@ -3,28 +3,49 @@
 //! Без аргументов прогоняет tests/fixtures/wake и tests/fixtures/negative.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use jarvis_app::resolver::{CommandResolver, Resolution, hotword_phrases};
+use jarvis_app::simulate::run_command;
+use jarvis_audio::asr::Hotwords;
 use jarvis_audio::bench::run_wake;
+use jarvis_audio::engines::{self, Engines};
 use jarvis_audio::resample::MODEL_RATE;
 use jarvis_audio::speaker::SpeakerEncoder;
-use jarvis_audio::wake::SherpaWakeWord;
+use jarvis_audio::stt::SherpaStt;
 use jarvis_audio::wav;
 use jarvis_core::Config;
+use jarvis_core::commands::Registry;
+use jarvis_core::config::resolve;
 
 use crate::hearing;
 
 pub fn run(root: &Path, config: &Config, files: &[PathBuf]) -> anyhow::Result<()> {
+    let explicit_files_empty = files.is_empty();
     let files = if files.is_empty() {
         default_files(root)?
     } else {
         files.to_vec()
     };
     let hearing = hearing::prepare(root, config)?;
+    let registry = Registry::load(&resolve(root, &config.paths.commands));
+    let hotwords = (config.listen.hotwords_score > 0.0).then(|| Hotwords {
+        phrases: hotword_phrases(&registry, &config.wake.words),
+        score: config.listen.hotwords_score,
+    });
 
+    // Та же сборка, что в демоне: один распознаватель, два потока.
     let started = Instant::now();
-    let mut engine = SherpaWakeWord::new(&hearing.models.asr, hearing.matcher.clone())?;
+    let Engines {
+        wake: mut engine,
+        stt,
+    } = engines::build(
+        &hearing.models.asr,
+        hearing.matcher.clone(),
+        config.listen.end_silence_ms as f32 / 1000.0,
+        hotwords.as_ref(),
+    )?;
     let load_asr = started.elapsed();
     let started = Instant::now();
     let encoder = SpeakerEncoder::new(&hearing.models.speaker)?;
@@ -112,7 +133,112 @@ pub fn run(root: &Path, config: &Config, files: &[PathBuf]) -> anyhow::Result<()
         );
     }
     println!("«от конца, мс» < 0 — слово сработало раньше конца фразы (оно было не последним).");
+
+    if explicit_files_empty {
+        let resolver = CommandResolver::new(&registry, hearing.matcher.clone(), &config.nlu);
+        bench_commands(root, config, &resolver, stt)?;
+    }
     Ok(())
+}
+
+/// Команды: распознавание, сопоставление, когда принято решение.
+/// Ожидаемый id — имя файла до «__» (`unknown_*` — «не понял»).
+fn bench_commands(
+    root: &Path,
+    config: &Config,
+    resolver: &CommandResolver,
+    mut stt: SherpaStt,
+) -> anyhow::Result<()> {
+    let early_stable = Duration::from_millis(u64::from(config.nlu.early_stable_ms));
+
+    println!();
+    println!(
+        "Команды (конец фразы — тишина {} мс; раннее решение — сходство ≥ {}, текст стабилен {} мс):",
+        config.listen.end_silence_ms, config.nlu.early_score, config.nlu.early_stable_ms
+    );
+    println!(
+        "{:<34} {:<26} {:<18} {:>3} {:>12} {:>6}",
+        "файл", "текст", "решение", "", "от конца, мс", "как"
+    );
+    let mut ok = 0;
+    let mut total = 0;
+    let mut delays = Vec::new();
+    for file in files_in(root, "commands")? {
+        let name = file
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let expected = name.split("__").next().unwrap_or_default().to_owned();
+        let samples = wav::read(&file)?.resampled(MODEL_RATE)?.samples;
+        let run = run_command(
+            &mut stt,
+            resolver,
+            config.nlu.early_score,
+            early_stable,
+            &samples,
+        );
+        let decided = match &run.resolution {
+            Resolution::Command { id, .. } => id.clone(),
+            Resolution::NotUnderstood { .. } => "не понял".into(),
+            Resolution::Ambiguous { .. } => "переспросить".into(),
+            Resolution::Empty => "—".into(),
+        };
+        let correct = if expected.starts_with("unknown") {
+            matches!(run.resolution, Resolution::NotUnderstood { .. })
+        } else {
+            decided == expected
+        };
+        total += 1;
+        if correct {
+            ok += 1;
+            // Задержку считаем по выполненным командам: «не понял» по смыслу
+            // ждёт конца фразы.
+            if matches!(run.resolution, Resolution::Command { .. })
+                && let Some(d) = run.decided_after_speech
+            {
+                delays.push(d);
+            }
+        }
+        println!(
+            "{:<34} {:<26} {:<18} {:>3} {:>12} {:>6}",
+            name,
+            run.text.chars().take(26).collect::<String>(),
+            decided,
+            if correct { "✓" } else { "✗" },
+            run.decided_after_speech
+                .map_or("—".into(), |d| format!("{:+.0}", d * 1000.0)),
+            if run.early { "рано" } else { "итог" }
+        );
+    }
+    println!();
+    println!("Верно: {ok} из {total}");
+    if !delays.is_empty() {
+        delays.sort_by(f32::total_cmp);
+        let avg = delays.iter().sum::<f32>() / delays.len() as f32;
+        let median = delays[delays.len() / 2];
+        let max = delays[delays.len() - 1];
+        let within = delays.iter().filter(|d| **d <= 0.5).count();
+        println!(
+            "Команда выполнена после конца фразы: в среднем {:.0} мс, медиана {:.0} мс, худшее {:.0} мс; \
+             ≤ 500 мс (цель ТЗ) — {within} из {}",
+            avg * 1000.0,
+            median * 1000.0,
+            max * 1000.0,
+            delays.len()
+        );
+    }
+    Ok(())
+}
+
+fn files_in(root: &Path, kind: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let dir = root.join("tests").join("fixtures").join(kind);
+    let mut found: Vec<_> = std::fs::read_dir(&dir)
+        .with_context(|| format!("нет папки {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "wav"))
+        .collect();
+    found.sort();
+    Ok(found)
 }
 
 fn default_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {

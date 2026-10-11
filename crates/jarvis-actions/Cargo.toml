@@ -1,0 +1,15 @@
+[package]
+name = "jarvis-actions"
+description = "Исполнители действий команд: open_url, media, say (позже — программы, скрипты, клавиши)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jarvis-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

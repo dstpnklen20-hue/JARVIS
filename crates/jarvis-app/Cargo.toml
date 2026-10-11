@@ -6,13 +6,19 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "jarvis_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "jarvis"
 path = "src/main.rs"
 
 [dependencies]
+jarvis-actions.workspace = true
 jarvis-audio.workspace = true
 jarvis-core.workspace = true
+jarvis-nlu.workspace = true
 jarvis-platform.workspace = true
 
 anyhow.workspace = true

@@ -1,6 +1,9 @@
 //! Реализация для Windows через `windows-sys`.
 
+mod actions;
 mod event_loop;
+
+pub use actions::{MediaKey, media_key, open_url};
 mod instance;
 mod stop;
 mod system;

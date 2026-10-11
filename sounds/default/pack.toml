@@ -2,6 +2,6 @@ name = "Стандартный (Microsoft Pavel)"
 
 [replies]
 wake = ["wake_1.wav", "wake_2.wav", "wake_3.wav"]
-done = ["done_1.wav", "done_2.wav"]
+ok = ["ok_1.wav", "ok_2.wav"]
 not_understood = ["not_understood_1.wav", "not_understood_2.wav"]
 failed = ["failed_1.wav"]

@@ -1,0 +1,60 @@
+# Мультимедиа-клавиши: работают с любым плеером, который их понимает
+# (браузер, Spotify, Яндекс Музыка, системный плеер).
+pack = "media"
+version = 1
+
+[[command]]
+id = "media_play_pause"
+phrases = ["включи музыку", "поставь на паузу", "пауза", "продолжи", "продолжи воспроизведение"]
+description = "нажмёт «воспроизведение/пауза»"
+reply = "none"
+[command.action]
+type = "media"
+operation = "play_pause"
+
+[[command]]
+id = "media_next"
+phrases = ["следующий трек", "следующая песня", "дальше"]
+description = "переключит на следующий трек"
+reply = "none"
+[command.action]
+type = "media"
+operation = "next"
+
+[[command]]
+id = "media_previous"
+phrases = ["предыдущий трек", "предыдущая песня", "назад"]
+description = "переключит на предыдущий трек"
+reply = "none"
+[command.action]
+type = "media"
+operation = "previous"
+
+[[command]]
+id = "media_volume_up"
+phrases = ["громче", "сделай громче", "прибавь звук"]
+description = "прибавит громкость на 10 %"
+reply = "none"
+[command.action]
+type = "media"
+operation = "volume_up"
+steps = 5
+
+[[command]]
+id = "media_volume_down"
+phrases = ["тише", "сделай тише", "убавь звук"]
+description = "убавит громкость на 10 %"
+reply = "none"
+[command.action]
+type = "media"
+operation = "volume_down"
+steps = 5
+
+[[command]]
+id = "media_mute"
+phrases = ["выключи звук", "включи звук", "без звука"]
+description = "выключит или включит звук"
+reply = "none"
+[command.action]
+type = "media"
+operation = "mute"

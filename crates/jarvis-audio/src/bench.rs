@@ -80,6 +80,23 @@ pub fn run_wake(engine: &mut dyn WakeWordEngine, samples: &[f32]) -> WakeRun {
     }
 }
 
+/// Подаёт запись (с тишиной до и после) порциями по 20 мс: `feed(t, порция)`,
+/// где `t` — конец порции в секундах от начала записи (отрицательный — тишина
+/// до неё). Возвращает конец речи в записи (секунды).
+pub fn simulate_stream(samples: &[f32], mut feed: impl FnMut(f32, &[f32])) -> f32 {
+    let lead = (LEAD_SECS * MODEL_RATE as f32) as usize;
+    let tail = (TAIL_SECS * MODEL_RATE as f32) as usize;
+    let mut audio = vec![0.0; lead];
+    audio.extend_from_slice(samples);
+    audio.extend(std::iter::repeat_n(0.0, tail));
+    let mut fed = 0usize;
+    for chunk in audio.chunks(CHUNK) {
+        fed += chunk.len();
+        feed(fed as f32 / MODEL_RATE as f32 - LEAD_SECS, chunk);
+    }
+    speech_end_secs(samples)
+}
+
 /// Конец речи (секунды) — для отчётов по фрагментам.
 pub fn speech_end_secs(samples: &[f32]) -> f32 {
     samples

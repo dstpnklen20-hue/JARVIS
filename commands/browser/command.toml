@@ -1,0 +1,30 @@
+# Сайты в браузере по умолчанию.
+pack = "browser"
+version = 1
+
+[[command]]
+id = "open_youtube"
+phrases = ["открой ютуб", "запусти ютуб", "включи ютуб", "открой youtube"]
+description = "откроет YouTube в браузере"
+reply = "ok"
+[command.action]
+type = "open_url"
+url = "https://www.youtube.com"
+
+[[command]]
+id = "open_google"
+phrases = ["открой гугл", "открой google", "открой поиск"]
+description = "откроет поиск Google в браузере"
+reply = "ok"
+[command.action]
+type = "open_url"
+url = "https://www.google.com"
+
+[[command]]
+id = "open_yandex"
+phrases = ["открой яндекс"]
+description = "откроет Яндекс в браузере"
+reply = "ok"
+[command.action]
+type = "open_url"
+url = "https://ya.ru"

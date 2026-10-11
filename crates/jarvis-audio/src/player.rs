@@ -5,7 +5,7 @@
 //! переводятся в частоту устройства, а callback только копирует отсчёты —
 //! без блокировок и аллокаций (команды приходят через lock-free очередь).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +32,14 @@ pub struct Player {
     rng: u64,
     device_rate: u32,
     gain: f32,
+    /// Последние произвольные клипы. Поток вывода отпускает клип, когда
+    /// он доиграл или его сменил следующий; пока клип есть и здесь, его
+    /// память не освобождается в потоке реального времени.
+    adhoc: VecDeque<Arc<[f32]>>,
 }
+
+/// Сколько последних произвольных клипов держать (хватило бы двух).
+const ADHOC_KEEP: usize = 4;
 
 impl Player {
     /// Открывает устройство вывода по умолчанию и готовит клипы пакета.
@@ -87,6 +94,7 @@ impl Player {
             rng: seed(),
             device_rate,
             gain: volume,
+            adhoc: VecDeque::new(),
         })
     }
 
@@ -111,6 +119,24 @@ impl Player {
             return None;
         }
         Some(duration)
+    }
+
+    /// Проигрывает произвольный клип (действие `say` со своим файлом).
+    /// Ресемплинг — здесь, не в потоке вывода.
+    pub fn play_clip(&mut self, clip: &crate::wav::Clip) -> Result<Duration, AudioError> {
+        let samples: Arc<[f32]> = clip.trimmed().resampled(self.device_rate)?.samples.into();
+        let duration = Duration::from_secs_f64(samples.len() as f64 / f64::from(self.device_rate));
+        self.adhoc.push_back(Arc::clone(&samples));
+        if self.adhoc.len() > ADHOC_KEEP {
+            self.adhoc.pop_front();
+        }
+        self.commands
+            .try_push(Command::Play {
+                samples,
+                gain: self.gain,
+            })
+            .map_err(|_| AudioError::Device("очередь звука переполнена".into()))?;
+        Ok(duration)
     }
 
     /// Немедленно замолчать.

@@ -1,0 +1,13 @@
+[package]
+name = "jarvis-nlu"
+description = "Понимание команд: нормализация текста и нечёткое сопоставление с фразами"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+strsim.workspace = true
+
+[lints]
+workspace = true

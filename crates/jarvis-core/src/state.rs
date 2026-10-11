@@ -2,11 +2,16 @@
 //!
 //! Переходы — чистая функция [`transition`]: состояние + событие + текущее
 //! время → новое состояние и список эффектов. Эффекты исполняет вызывающий
-//! код (воспроизвести звук, остановить микрофон). Так все переходы
-//! проверяются тестами без звука, потоков и часов.
+//! код (воспроизвести звук, выполнить команду, остановить микрофон). Так
+//! все переходы проверяются тестами без звука, потоков и часов.
 //!
-//! Этап 1: `PAUSED ⇄ IDLE → LISTENING → IDLE`. Остальные состояния
-//! (ASKING_PERMISSION, EXECUTING, FOLLOW_UP, GAME_MODE) появятся на своих этапах.
+//! ```text
+//! PAUSED ⇄ IDLE ──«Джарвис»──▶ LISTENING ──команда──▶ EXECUTING ──готово──▶ FOLLOW_UP
+//!            ▲                     │ тайм-аут                                 │ команда → EXECUTING
+//!            └─────────────────────┴──────────────── тайм-аут ────────────────┘
+//! ```
+//!
+//! ASKING_PERMISSION появится на этапе 3, GAME_MODE — на этапе 6.
 
 use std::time::{Duration, Instant};
 
@@ -18,12 +23,32 @@ pub enum State {
     Idle,
     /// Услышали «Джарвис», ждём команду до `until`.
     Listening { until: Instant },
+    /// Выполняется команда.
+    Executing,
+    /// После команды ещё ждём следующую без «Джарвис» до `until`.
+    FollowUp { until: Instant },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl State {
+    /// Принимаются ли сейчас команды без слова активации.
+    pub fn accepts_commands(&self) -> bool {
+        matches!(self, State::Listening { .. } | State::FollowUp { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Распознано слово активации (и, если включено, подтверждён голос).
     WakeWord,
+    /// Распознана команда с этим id.
+    Command(String),
+    /// Фраза не похожа ни на одну команду.
+    NotUnderstood,
+    /// Команда выполнена; `reply` — что сказать (уже выбрано ядром:
+    /// ответ команды при успехе, «не удалось» при ошибке, ничего для `say`).
+    ActionFinished {
+        reply: Option<Reply>,
+    },
     /// Периодический такт: проверка таймаутов.
     Tick,
     /// Пункт «Пауза» в трее (переключатель).
@@ -53,22 +78,27 @@ impl Reply {
         Reply::Failed,
     ];
 
-    /// Ключ в `pack.toml` звукового пакета.
+    /// Ключ в `pack.toml` звукового пакета и в `reply` манифеста команды.
     pub fn key(self) -> &'static str {
         match self {
             Reply::Wake => "wake",
-            Reply::Done => "done",
+            Reply::Done => "ok",
             Reply::NotUnderstood => "not_understood",
             Reply::Failed => "failed",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     PlayReply(Reply),
-    /// Включить или выключить прослушивание микрофона.
+    /// Включить или выключить микрофон.
     SetListening(bool),
+    /// Включить или выключить распознавание команд (слово активации
+    /// включает его само, без задержки на круг через ядро).
+    SetTranscribing(bool),
+    /// Выполнить команду с этим id.
+    Execute(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +114,10 @@ impl Transition {
             effects: Vec::new(),
         }
     }
+
+    fn to(next: State, effects: Vec<Effect>) -> Self {
+        Self { next, effects }
+    }
 }
 
 /// Настройки, влияющие на переходы.
@@ -91,41 +125,66 @@ impl Transition {
 pub struct Timings {
     /// Сколько ждать команду после «Джарвис».
     pub listen: Duration,
+    /// Сколько ждать следующую команду после выполненной (FOLLOW_UP).
+    pub follow_up: Duration,
 }
 
 pub fn transition(state: State, event: Event, now: Instant, timings: Timings) -> Transition {
     use Event as E;
     use State as S;
 
-    let pause = || Transition {
-        next: S::Paused,
-        effects: vec![Effect::SetListening(false)],
+    let listening = || S::Listening {
+        until: now + timings.listen,
     };
 
     match (state, event) {
-        (S::Idle, E::WakeWord) => Transition {
-            next: S::Listening {
-                until: now + timings.listen,
+        // --- пауза: из любого активного состояния ---
+        (S::Paused, E::Resume | E::TogglePause) => {
+            Transition::to(S::Idle, vec![Effect::SetListening(true)])
+        }
+        (S::Paused, _) => Transition::stay(S::Paused),
+        (_, E::Pause | E::TogglePause) => Transition::to(
+            S::Paused,
+            vec![Effect::SetTranscribing(false), Effect::SetListening(false)],
+        ),
+        (_, E::Resume) => Transition::stay(state),
+
+        // --- слово активации ---
+        (S::Idle | S::FollowUp { .. }, E::WakeWord) => {
+            Transition::to(listening(), vec![Effect::PlayReply(Reply::Wake)])
+        }
+        // Повторное «Джарвис» во время ожидания команды: продлеваем без
+        // повторного ответа, чтобы не перебивать пользователя.
+        (S::Listening { .. }, E::WakeWord) => Transition::stay(listening()),
+        (S::Executing, E::WakeWord) => Transition::stay(S::Executing),
+
+        // --- команды ---
+        (S::Listening { .. } | S::FollowUp { .. }, E::Command(id)) => {
+            Transition::to(S::Executing, vec![Effect::Execute(id)])
+        }
+        // После «Джарвис» непонятная фраза — переспросить; в FOLLOW_UP это
+        // скорее посторонний разговор — молчим.
+        (S::Listening { .. }, E::NotUnderstood) => {
+            Transition::to(listening(), vec![Effect::PlayReply(Reply::NotUnderstood)])
+        }
+        (S::FollowUp { .. } | S::Idle | S::Executing, E::NotUnderstood) => Transition::stay(state),
+        // Команда без «Джарвис» в ожидании и вторая команда во время первой — игнор.
+        (S::Idle | S::Executing, E::Command(_)) => Transition::stay(state),
+
+        // --- окончание команды ---
+        (S::Executing, E::ActionFinished { reply }) => Transition::to(
+            S::FollowUp {
+                until: now + timings.follow_up,
             },
-            effects: vec![Effect::PlayReply(Reply::Wake)],
-        },
-        // Повторное «Джарвис» во время ожидания команды: продлеваем ожидание
-        // без повторного ответа, чтобы не перебивать пользователя.
-        (S::Listening { .. }, E::WakeWord) => Transition::stay(S::Listening {
-            until: now + timings.listen,
-        }),
-        (S::Listening { until }, E::Tick) if now >= until => Transition::stay(S::Idle),
-        (S::Listening { .. } | S::Idle, E::Tick) => Transition::stay(state),
+            reply.map(Effect::PlayReply).into_iter().collect(),
+        ),
+        (_, E::ActionFinished { .. }) => Transition::stay(state),
 
-        (S::Idle | S::Listening { .. }, E::Pause | E::TogglePause) => pause(),
-        (S::Idle | S::Listening { .. }, E::Resume) => Transition::stay(state),
-
-        (S::Paused, E::Resume | E::TogglePause) => Transition {
-            next: S::Idle,
-            effects: vec![Effect::SetListening(true)],
-        },
-        // На паузе микрофон выключен: запоздавшее «Джарвис» из очереди игнорируем.
-        (S::Paused, E::WakeWord | E::Tick | E::Pause) => Transition::stay(S::Paused),
+        // --- таймауты ---
+        (S::Listening { until } | S::FollowUp { until }, E::Tick) if now >= until => {
+            Transition::to(S::Idle, vec![Effect::SetTranscribing(false)])
+        }
+        (_, E::Tick) => Transition::stay(state),
     }
 }
 
@@ -135,10 +194,29 @@ mod tests {
 
     const T: Timings = Timings {
         listen: Duration::from_secs(6),
+        follow_up: Duration::from_secs(12),
     };
 
     fn now() -> Instant {
         Instant::now()
+    }
+
+    fn cmd(id: &str) -> Event {
+        Event::Command(id.into())
+    }
+
+    fn all_states(t0: Instant) -> [State; 5] {
+        [
+            State::Paused,
+            State::Idle,
+            State::Listening {
+                until: t0 + T.listen,
+            },
+            State::Executing,
+            State::FollowUp {
+                until: t0 + T.follow_up,
+            },
+        ]
     }
 
     #[test]
@@ -157,9 +235,8 @@ mod tests {
     #[test]
     fn listening_wake_extends_without_answer() {
         let t0 = now();
-        let state = State::Listening { until: t0 };
         let later = t0 + Duration::from_secs(2);
-        let tr = transition(state, Event::WakeWord, later, T);
+        let tr = transition(State::Listening { until: t0 }, Event::WakeWord, later, T);
         assert_eq!(
             tr.next,
             State::Listening {
@@ -170,42 +247,166 @@ mod tests {
     }
 
     #[test]
-    fn listening_times_out_to_idle() {
+    fn follow_up_wake_answers_and_listens() {
         let t0 = now();
-        let state = State::Listening {
-            until: t0 + T.listen,
-        };
-        assert_eq!(transition(state, Event::Tick, t0, T).next, state);
-        let at_deadline = transition(state, Event::Tick, t0 + T.listen, T);
-        assert_eq!(at_deadline.next, State::Idle);
-        assert!(at_deadline.effects.is_empty());
-    }
-
-    #[test]
-    fn idle_tick_and_resume_change_nothing() {
-        for event in [Event::Tick, Event::Resume] {
-            let tr = transition(State::Idle, event, now(), T);
-            assert_eq!(tr, Transition::stay(State::Idle), "{event:?}");
-        }
-        let listening = State::Listening {
-            until: now() + T.listen,
-        };
+        let tr = transition(State::FollowUp { until: t0 }, Event::WakeWord, t0, T);
         assert_eq!(
-            transition(listening, Event::Resume, now(), T),
-            Transition::stay(listening)
+            tr.next,
+            State::Listening {
+                until: t0 + T.listen
+            }
         );
+        assert_eq!(tr.effects, [Effect::PlayReply(Reply::Wake)]);
     }
 
     #[test]
-    fn pause_from_any_active_state_stops_listening() {
-        let listening = State::Listening {
-            until: now() + T.listen,
-        };
-        for state in [State::Idle, listening] {
+    fn command_while_listening_or_follow_up_executes() {
+        let t0 = now();
+        for state in [
+            State::Listening {
+                until: t0 + T.listen,
+            },
+            State::FollowUp {
+                until: t0 + T.follow_up,
+            },
+        ] {
+            let tr = transition(state, cmd("open_youtube"), t0, T);
+            assert_eq!(tr.next, State::Executing, "{state:?}");
+            assert_eq!(tr.effects, [Effect::Execute("open_youtube".into())]);
+        }
+    }
+
+    #[test]
+    fn command_ignored_when_idle_executing_or_paused() {
+        let t0 = now();
+        for state in [State::Idle, State::Executing, State::Paused] {
+            assert_eq!(transition(state, cmd("x"), t0, T), Transition::stay(state));
+        }
+    }
+
+    #[test]
+    fn finished_action_goes_to_follow_up_with_reply() {
+        let t0 = now();
+        let tr = transition(
+            State::Executing,
+            Event::ActionFinished {
+                reply: Some(Reply::Done),
+            },
+            t0,
+            T,
+        );
+        assert_eq!(
+            tr.next,
+            State::FollowUp {
+                until: t0 + T.follow_up
+            }
+        );
+        assert_eq!(tr.effects, [Effect::PlayReply(Reply::Done)]);
+
+        let silent = transition(
+            State::Executing,
+            Event::ActionFinished { reply: None },
+            t0,
+            T,
+        );
+        assert!(silent.effects.is_empty());
+    }
+
+    #[test]
+    fn late_action_result_is_ignored_elsewhere() {
+        let t0 = now();
+        for state in all_states(t0) {
+            if state == State::Executing {
+                continue;
+            }
+            let tr = transition(
+                state,
+                Event::ActionFinished {
+                    reply: Some(Reply::Done),
+                },
+                t0,
+                T,
+            );
+            assert_eq!(tr, Transition::stay(state), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn not_understood_answers_only_after_wake_word() {
+        let t0 = now();
+        let tr = transition(State::Listening { until: t0 }, Event::NotUnderstood, t0, T);
+        assert_eq!(
+            tr.next,
+            State::Listening {
+                until: t0 + T.listen
+            }
+        );
+        assert_eq!(tr.effects, [Effect::PlayReply(Reply::NotUnderstood)]);
+        for state in [
+            State::FollowUp { until: t0 },
+            State::Idle,
+            State::Executing,
+            State::Paused,
+        ] {
+            assert_eq!(
+                transition(state, Event::NotUnderstood, t0, T),
+                Transition::stay(state)
+            );
+        }
+    }
+
+    #[test]
+    fn listening_and_follow_up_time_out_to_idle() {
+        let t0 = now();
+        for state in [
+            State::Listening {
+                until: t0 + T.listen,
+            },
+            State::FollowUp {
+                until: t0 + T.listen,
+            },
+        ] {
+            assert_eq!(
+                transition(state, Event::Tick, t0, T),
+                Transition::stay(state)
+            );
+            let tr = transition(state, Event::Tick, t0 + T.listen, T);
+            assert_eq!(tr.next, State::Idle, "{state:?}");
+            assert_eq!(tr.effects, [Effect::SetTranscribing(false)]);
+        }
+    }
+
+    #[test]
+    fn tick_does_not_change_idle_executing_paused() {
+        let t0 = now();
+        for state in [State::Idle, State::Executing, State::Paused] {
+            assert_eq!(
+                transition(state, Event::Tick, t0, T),
+                Transition::stay(state)
+            );
+        }
+    }
+
+    #[test]
+    fn executing_ignores_wake_word() {
+        let tr = transition(State::Executing, Event::WakeWord, now(), T);
+        assert_eq!(tr, Transition::stay(State::Executing));
+    }
+
+    #[test]
+    fn pause_from_every_active_state() {
+        let t0 = now();
+        for state in all_states(t0) {
+            if state == State::Paused {
+                continue;
+            }
             for event in [Event::Pause, Event::TogglePause] {
-                let tr = transition(state, event, now(), T);
+                let tr = transition(state, event.clone(), t0, T);
                 assert_eq!(tr.next, State::Paused, "{state:?} + {event:?}");
-                assert_eq!(tr.effects, [Effect::SetListening(false)]);
+                assert_eq!(
+                    tr.effects,
+                    [Effect::SetTranscribing(false), Effect::SetListening(false)]
+                );
             }
         }
     }
@@ -213,17 +414,86 @@ mod tests {
     #[test]
     fn resume_from_pause_returns_to_idle() {
         for event in [Event::Resume, Event::TogglePause] {
-            let tr = transition(State::Paused, event, now(), T);
+            let tr = transition(State::Paused, event.clone(), now(), T);
             assert_eq!(tr.next, State::Idle, "{event:?}");
             assert_eq!(tr.effects, [Effect::SetListening(true)]);
         }
     }
 
     #[test]
-    fn paused_ignores_wake_tick_and_pause() {
-        for event in [Event::WakeWord, Event::Tick, Event::Pause] {
-            let tr = transition(State::Paused, event, now(), T);
-            assert_eq!(tr, Transition::stay(State::Paused), "{event:?}");
+    fn resume_elsewhere_changes_nothing() {
+        let t0 = now();
+        for state in all_states(t0) {
+            if state == State::Paused {
+                continue;
+            }
+            assert_eq!(
+                transition(state, Event::Resume, t0, T),
+                Transition::stay(state)
+            );
         }
+    }
+
+    #[test]
+    fn paused_ignores_everything_but_resume() {
+        let t0 = now();
+        for event in [
+            Event::WakeWord,
+            cmd("x"),
+            Event::NotUnderstood,
+            Event::ActionFinished { reply: None },
+            Event::Tick,
+            Event::Pause,
+        ] {
+            assert_eq!(
+                transition(State::Paused, event.clone(), t0, T),
+                Transition::stay(State::Paused),
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_commands_only_when_waiting_for_them() {
+        let t0 = now();
+        let accepting: Vec<bool> = all_states(t0).iter().map(State::accepts_commands).collect();
+        assert_eq!(accepting, [false, false, true, false, true]);
+    }
+
+    #[test]
+    fn full_scenario_wake_command_follow_up_command_timeout() {
+        // «Джарвис, открой ютуб», затем «включи музыку» без «Джарвис».
+        let t0 = now();
+        let mut s = State::Idle;
+        let mut step = |event: Event, at: Instant| {
+            let tr = transition(s, event, at, T);
+            s = tr.next;
+            tr.effects
+        };
+        assert_eq!(step(Event::WakeWord, t0), [Effect::PlayReply(Reply::Wake)]);
+        assert_eq!(
+            step(cmd("open_youtube"), t0),
+            [Effect::Execute("open_youtube".into())]
+        );
+        assert_eq!(
+            step(
+                Event::ActionFinished {
+                    reply: Some(Reply::Done)
+                },
+                t0
+            ),
+            [Effect::PlayReply(Reply::Done)]
+        );
+        let t1 = t0 + Duration::from_secs(5);
+        assert_eq!(
+            step(cmd("media_play_pause"), t1),
+            [Effect::Execute("media_play_pause".into())]
+        );
+        assert!(step(Event::ActionFinished { reply: None }, t1).is_empty());
+        assert_eq!(
+            step(Event::Tick, t1 + T.follow_up),
+            [Effect::SetTranscribing(false)]
+        );
+        assert_eq!(s, State::Idle);
     }
 }

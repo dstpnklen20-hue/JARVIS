@@ -29,6 +29,9 @@ pub const LOG_MAX_FILES_RANGE: std::ops::RangeInclusive<usize> = 1..=365;
 pub const LISTEN_SECS_RANGE: std::ops::RangeInclusive<u32> = 2..=30;
 pub const MAX_EDIT_DISTANCE: usize = 2;
 pub const VOLUME_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
+pub const END_SILENCE_MS_RANGE: std::ops::RangeInclusive<u32> = 300..=2000;
+pub const HOTWORDS_SCORE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=4.0;
+pub const EARLY_STABLE_MS_RANGE: std::ops::RangeInclusive<u32> = 0..=2000;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +39,8 @@ pub struct Config {
     pub general: General,
     pub audio: Audio,
     pub wake: Wake,
+    pub listen: Listen,
+    pub nlu: Nlu,
     pub speaker: Speaker,
     pub vad: Vad,
     pub voice: Voice,
@@ -53,6 +58,26 @@ pub struct Wake {
     pub max_edit_distance: usize,
     /// Сколько секунд после «Джарвис» ждать команду.
     pub listen_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Listen {
+    /// Тишина в конце фразы, мс.
+    pub end_silence_ms: u32,
+    /// Сила подсказок распознавателю (0 — выключены).
+    pub hotwords_score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Nlu {
+    pub min_score: f32,
+    pub ambiguity_margin: f32,
+    pub early_score: f32,
+    pub early_stable_ms: u32,
+    /// Решение по однозначному началу фразы: доля длины фразы (0 — выключено).
+    pub prefix_min_ratio: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -288,6 +313,41 @@ impl Config {
             LISTEN_SECS_RANGE.contains(&self.wake.listen_secs),
             "wake.listen_secs",
             out_of_range(self.wake.listen_secs, &LISTEN_SECS_RANGE),
+        );
+        check(
+            END_SILENCE_MS_RANGE.contains(&self.listen.end_silence_ms),
+            "listen.end_silence_ms",
+            out_of_range(self.listen.end_silence_ms, &END_SILENCE_MS_RANGE),
+        );
+        check(
+            HOTWORDS_SCORE_RANGE.contains(&self.listen.hotwords_score),
+            "listen.hotwords_score",
+            out_of_range(self.listen.hotwords_score, &HOTWORDS_SCORE_RANGE),
+        );
+        for (key, value) in [
+            ("nlu.min_score", self.nlu.min_score),
+            ("nlu.ambiguity_margin", self.nlu.ambiguity_margin),
+            ("nlu.early_score", self.nlu.early_score),
+            ("nlu.prefix_min_ratio", self.nlu.prefix_min_ratio),
+        ] {
+            check(
+                (0.0..=1.0).contains(&value),
+                key,
+                out_of_range(value, &(0.0..=1.0)),
+            );
+        }
+        check(
+            self.nlu.early_score >= self.nlu.min_score,
+            "nlu.early_score",
+            format!(
+                "{} меньше nlu.min_score ({}) — раннее срабатывание было бы менее строгим, чем обычное",
+                self.nlu.early_score, self.nlu.min_score
+            ),
+        );
+        check(
+            EARLY_STABLE_MS_RANGE.contains(&self.nlu.early_stable_ms),
+            "nlu.early_stable_ms",
+            out_of_range(self.nlu.early_stable_ms, &EARLY_STABLE_MS_RANGE),
         );
         if let SpeakerThreshold::Fixed(t) = self.speaker.threshold {
             check(
@@ -585,6 +645,27 @@ mod tests {
     fn wake_words_are_replaced_not_merged() {
         let config = load(Some("[wake]\nwords = [\"пятница\"]\n")).unwrap();
         assert_eq!(config.wake.words, ["пятница"]);
+    }
+
+    #[test]
+    fn listen_and_nlu_values_are_validated() {
+        let err = load(Some(
+            "[listen]\nend_silence_ms = 100\nhotwords_score = 9\n[nlu]\nmin_score = 0.9\nearly_score = 0.8\nambiguity_margin = 2\n",
+        ))
+        .unwrap_err();
+        let ConfigError::Invalid(problems) = err else {
+            panic!("ожидали Invalid, получили {err:?}");
+        };
+        let keys: Vec<_> = problems.iter().map(|p| p.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "listen.end_silence_ms",
+                "listen.hotwords_score",
+                "nlu.ambiguity_margin",
+                "nlu.early_score"
+            ]
+        );
     }
 
     #[test]

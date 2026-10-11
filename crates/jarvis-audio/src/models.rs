@@ -21,6 +21,8 @@ pub struct AsrModel {
     pub decoder: PathBuf,
     pub joiner: PathBuf,
     pub tokens: PathBuf,
+    /// SentencePiece-модель: нужна для подсказок (hotwords).
+    pub bpe: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,7 @@ impl SpeechModels {
                 decoder: file(asr, "decoder.onnx")?,
                 joiner: file(asr, "joiner.int8.onnx")?,
                 tokens: file(asr, "tokens.txt")?,
+                bpe: file(asr, "bpe.model")?,
             },
             vad,
             speaker: file(speaker, speaker_file)?,

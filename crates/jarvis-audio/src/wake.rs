@@ -6,6 +6,8 @@
 //! ([`WakeMatcher`]). Срабатывает по частичному результату — не дожидаясь
 //! конца фразы.
 
+use std::sync::Arc;
+
 use sherpa_onnx::{OnlineRecognizer, OnlineStream};
 
 use crate::AudioError;
@@ -95,7 +97,8 @@ impl WakeMatcher {
 
 /// Слово активации на потоковой модели sherpa-onnx.
 pub struct SherpaWakeWord {
-    recognizer: OnlineRecognizer,
+    /// Может быть общим с распознаванием команд (один экземпляр модели в памяти).
+    recognizer: Arc<OnlineRecognizer>,
     stream: OnlineStream,
     matcher: WakeMatcher,
     /// Слова текущей фразы, которые уже проверены и сработали.
@@ -110,8 +113,14 @@ pub struct SherpaWakeWord {
 }
 
 impl SherpaWakeWord {
+    /// Со своим распознавателем (жадный поиск, без подсказок).
     pub fn new(model: &AsrModel, matcher: WakeMatcher) -> Result<Self, AudioError> {
         let recognizer = create_recognizer(model, Endpointing::default())?;
+        Ok(Self::with_recognizer(Arc::new(recognizer), matcher))
+    }
+
+    /// На общем распознавателе (см. [`crate::engines`]).
+    pub fn with_recognizer(recognizer: Arc<OnlineRecognizer>, matcher: WakeMatcher) -> Self {
         let stream = recognizer.create_stream();
         let mut engine = Self {
             recognizer,
@@ -124,7 +133,7 @@ impl SherpaWakeWord {
             quiet_samples: 0,
         };
         engine.warm_up();
-        Ok(engine)
+        engine
     }
 
     /// Первый прогон модели медленнее остальных — делаем его на тишине
@@ -147,7 +156,7 @@ impl SherpaWakeWord {
 }
 
 /// Уровень (RMS), ниже которого звук считаем тишиной (≈ −46 dBFS).
-const QUIET_RMS: f32 = 0.005;
+pub(crate) const QUIET_RMS: f32 = 0.005;
 /// Сброс на «пустой» тишине — только если поток живёт дольше…
 const IDLE_RESET_SECS: f32 = 10.0;
 /// …и последние столько секунд действительно тихо.
@@ -165,7 +174,12 @@ const HARD_STREAM_SECS: f32 = 180.0;
 /// «орвис»). Поэтому на «пустой» тишине сбрасываем, только когда звук
 /// действительно тихий, а после законченной фразы — сразу (после неё уже
 /// 0.8 с тишины).
-fn should_reset(endpoint: bool, has_text: bool, stream_secs: f32, quiet_secs: f32) -> bool {
+pub(crate) fn should_reset(
+    endpoint: bool,
+    has_text: bool,
+    stream_secs: f32,
+    quiet_secs: f32,
+) -> bool {
     if stream_secs >= HARD_STREAM_SECS {
         return true;
     }
@@ -178,7 +192,7 @@ fn should_reset(endpoint: bool, has_text: bool, stream_secs: f32, quiet_secs: f3
     has_text || (stream_secs >= IDLE_RESET_SECS && quiet_secs >= QUIET_BEFORE_RESET_SECS)
 }
 
-fn rms(samples: &[f32]) -> f32 {
+pub(crate) fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }

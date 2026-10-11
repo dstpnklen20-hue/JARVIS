@@ -4,7 +4,7 @@
 //! name = "Стандартный"
 //! [replies]
 //! wake = ["wake_1.wav", "wake_2.wav"]   # обязательно
-//! done = ["done_1.wav"]
+//! ok = ["ok_1.wav"]
 //! ```
 //!
 //! На каждый ответ можно положить несколько вариантов — Джарвис чередует их.
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn missing_wake_is_rejected() {
-        let (_dir, pack) = load_pack("name = \"x\"\n[replies]\ndone = [\"a.wav\"]\n", &["a.wav"]);
+        let (_dir, pack) = load_pack("name = \"x\"\n[replies]\nok = [\"a.wav\"]\n", &["a.wav"]);
         assert!(pack.unwrap_err().to_string().contains("wake"));
     }
 

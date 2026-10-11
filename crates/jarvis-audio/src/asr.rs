@@ -27,9 +27,27 @@ impl Default for Endpointing {
     }
 }
 
+/// Подсказки декодеру (hotwords): фразы, которые стоит предпочитать при
+/// сомнениях. Замена ограниченной грамматики Vosk из ТЗ: распознаватель
+/// по-прежнему слышит любую речь, но слова команд узнаёт увереннее.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hotwords {
+    pub phrases: Vec<String>,
+    /// Сила подсказки (sherpa-onnx рекомендует 1.5–3).
+    pub score: f32,
+}
+
 pub fn create_recognizer(
     model: &AsrModel,
     endpointing: Endpointing,
+) -> Result<OnlineRecognizer, AudioError> {
+    create_recognizer_with(model, endpointing, None)
+}
+
+pub fn create_recognizer_with(
+    model: &AsrModel,
+    endpointing: Endpointing,
+    hotwords: Option<&Hotwords>,
 ) -> Result<OnlineRecognizer, AudioError> {
     let mut config = OnlineRecognizerConfig::default();
     config.feat_config.sample_rate = MODEL_RATE as i32;
@@ -39,7 +57,18 @@ pub fn create_recognizer(
     config.model_config.tokens = Some(path_str(&model.tokens));
     // Один поток: модель маленькая, а лишние потоки только греют CPU.
     config.model_config.num_threads = 1;
-    config.decoding_method = Some("greedy_search".into());
+    match hotwords.filter(|h| !h.phrases.is_empty()) {
+        None => config.decoding_method = Some("greedy_search".into()),
+        Some(h) => {
+            // Подсказки работают только с поиском по нескольким гипотезам.
+            config.decoding_method = Some("modified_beam_search".into());
+            config.max_active_paths = 4;
+            config.model_config.modeling_unit = Some("bpe".into());
+            config.model_config.bpe_vocab = Some(path_str(&crate::bpe::ensure_vocab(&model.bpe)?));
+            config.hotwords_score = h.score;
+            config.hotwords_buf = Some(h.phrases.join("\n").into_bytes());
+        }
+    }
     config.enable_endpoint = true;
     config.rule1_min_trailing_silence = endpointing.silence_without_speech;
     config.rule2_min_trailing_silence = endpointing.silence_after_speech;

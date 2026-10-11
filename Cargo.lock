@@ -1117,14 +1117,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jarvis-actions"
+version = "0.1.0"
+dependencies = [
+ "jarvis-core",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "jarvis-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "cpal",
+ "jarvis-actions",
  "jarvis-audio",
  "jarvis-core",
+ "jarvis-nlu",
  "jarvis-platform",
  "sherpa-onnx",
  "tracing",
@@ -1153,6 +1164,7 @@ dependencies = [
 name = "jarvis-core"
 version = "0.1.0"
 dependencies = [
+ "jarvis-nlu",
  "serde",
  "serde_json",
  "tempfile",
@@ -1162,6 +1174,13 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "jarvis-nlu"
+version = "0.1.0"
+dependencies = [
+ "strsim",
 ]
 
 [[package]]

@@ -19,6 +19,10 @@ pub use windows::{
     Waker, current_waker, install_ctrl_handler, notify_shutdown_complete, run_message_loop,
 };
 
+/// Системные действия команд: открыть адрес, мультимедиа-клавиши.
+#[cfg(windows)]
+pub use windows::{MediaKey, media_key, open_url};
+
 /// Мягкая остановка работающей копии извне (`jarvis --stop`).
 #[cfg(windows)]
 pub use windows::{StopSignal, create_stop_signal, send_stop_signal};

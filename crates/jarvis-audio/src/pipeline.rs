@@ -1,5 +1,7 @@
 //! Конвейер слуха в отдельном потоке:
-//! микрофон → ресемплинг до 16 кГц → слово активации → проверка голоса → событие.
+//! микрофон → ресемплинг до 16 кГц → слово активации → проверка голоса → событие;
+//! после «Джарвис» — распознавание команды (с начала слова активации, из
+//! буфера, — так команда «на одном дыхании» тоже попадает в текст).
 //!
 //! - На паузе микрофон закрывается (индикатор микрофона Windows гаснет).
 //! - Пока Джарвис говорит, вход заглушается ([`MuteGate`]) — он не слышит сам себя.
@@ -14,11 +16,17 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::asr::Hotwords;
 use crate::capture::Capture;
+use crate::engines::{self, Engines};
 use crate::models::SpeechModels;
 use crate::resample::{MODEL_RATE, StreamResampler};
 use crate::speaker::{SpeakerEncoder, Voiceprint};
+use crate::stt::{SherpaStt, SpeechToText, Transcript};
 use crate::wake::{SherpaWakeWord, WakeMatcher, WakeWordEngine};
+
+/// Сколько звука до начала слова активации отдать распознавателю команд.
+const PREROLL_MARGIN_SECS: f32 = 0.3;
 
 /// Сколько последних секунд звука держать для проверки голоса.
 const HISTORY_SECS: usize = 3;
@@ -36,6 +44,10 @@ pub struct PipelineSettings {
     pub matcher: WakeMatcher,
     /// Образец голоса и порог; `None` — голос не проверяется.
     pub voiceprint: Option<(Voiceprint, f32)>,
+    /// Тишина в конце команды, секунды.
+    pub end_silence: f32,
+    /// Подсказки распознавателю команд (фразы команд).
+    pub hotwords: Option<Hotwords>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +71,8 @@ pub enum PipelineEvent {
         sample_rate: u32,
     },
     Wake(WakeEvent),
+    /// Текст команды (частичный или итоговый).
+    Transcript(Transcript),
     /// Слово услышано, но голос не совпал с образцом.
     Rejected {
         heard: String,
@@ -73,6 +87,7 @@ pub enum PipelineEvent {
 
 enum Control {
     Listen(bool),
+    Transcribe(bool),
     Shutdown,
 }
 
@@ -129,6 +144,12 @@ impl Pipeline {
     /// Включить/выключить прослушивание (выключенное освобождает микрофон).
     pub fn set_listening(&self, on: bool) {
         let _ = self.control.send(Control::Listen(on));
+    }
+
+    /// Включить/выключить распознавание команд. Слово активации включает
+    /// его само; выключает ядро, когда команды больше не ждёт.
+    pub fn set_transcribing(&self, on: bool) {
+        let _ = self.control.send(Control::Transcribe(on));
     }
 
     /// Остановить поток и дождаться его завершения.
@@ -195,6 +216,9 @@ struct Worker<'a> {
     events: &'a EventSink,
     gate: &'a MuteGate,
     wake: SherpaWakeWord,
+    stt: SherpaStt,
+    /// Распознаются ли сейчас команды.
+    transcribing: bool,
     speaker: Option<SpeakerEncoder>,
     history: VecDeque<f32>,
     scratch: Vec<f32>,
@@ -208,8 +232,14 @@ fn worker(
     control: &Receiver<Control>,
 ) {
     let started = Instant::now();
-    let wake = match SherpaWakeWord::new(&settings.models.asr, settings.matcher.clone()) {
-        Ok(w) => w,
+    // Один распознаватель на слово активации и команды — одна модель в памяти.
+    let Engines { wake, stt } = match engines::build(
+        &settings.models.asr,
+        settings.matcher.clone(),
+        settings.end_silence,
+        settings.hotwords.as_ref(),
+    ) {
+        Ok(e) => e,
         Err(e) => {
             events(PipelineEvent::Fatal(jarvis_core::error_chain(&e)));
             return;
@@ -238,6 +268,8 @@ fn worker(
         events,
         gate,
         wake,
+        stt,
+        transcribing: false,
         speaker,
         history: VecDeque::with_capacity(MODEL_RATE as usize * HISTORY_SECS),
         scratch: Vec::new(),
@@ -276,9 +308,17 @@ impl Worker<'_> {
                     if !on {
                         capture = None;
                         self.wake.reset();
+                        self.transcribing = false;
                         self.history.clear();
                         tracing::info!("прослушивание на паузе, микрофон освобождён");
                     }
+                    continue;
+                }
+                Some(Control::Transcribe(on)) => {
+                    if on && !self.transcribing {
+                        self.stt.reset();
+                    }
+                    self.transcribing = on;
                     continue;
                 }
                 None => {}
@@ -373,6 +413,12 @@ impl Worker<'_> {
             self.history.drain(..excess);
         }
 
+        if self.transcribing
+            && let Some(transcript) = self.stt.accept(&self.resampled)
+        {
+            (self.events)(PipelineEvent::Transcript(transcript));
+        }
+
         let Some(detection) = self.wake.accept(&self.resampled) else {
             return;
         };
@@ -413,6 +459,24 @@ impl Worker<'_> {
             similarity,
             verify_time,
         }));
+
+        // Сразу включаем распознавание команды и отдаём ему звук с начала
+        // слова активации: «Джарвис, открой ютуб» на одном дыхании.
+        if !self.transcribing {
+            self.transcribing = true;
+            self.stt.reset();
+            let secs = detection.started_secs_ago.unwrap_or(1.0) + PREROLL_MARGIN_SECS;
+            let len = ((secs * MODEL_RATE as f32) as usize).min(self.history.len());
+            let preroll: Vec<f32> = self
+                .history
+                .iter()
+                .skip(self.history.len() - len)
+                .copied()
+                .collect();
+            if let Some(transcript) = self.stt.accept(&preroll) {
+                (self.events)(PipelineEvent::Transcript(transcript));
+            }
+        }
     }
 }
 

@@ -13,6 +13,7 @@ use jarvis_audio::models::SpeechModels;
 use jarvis_audio::pack::VoicePack;
 use jarvis_audio::speaker::Voiceprint;
 use jarvis_core::assets::{Asset, AssetStatus, MARKER_FILE, Manifest};
+use jarvis_core::commands::Registry;
 use jarvis_core::config::{DEFAULT_FILE, USER_FILE, resolve};
 use jarvis_core::root::{self, project_path};
 use jarvis_core::state::Reply;
@@ -136,6 +137,7 @@ fn collect(explicit_root: Option<&Path>) -> (String, Vec<Item>) {
     if let Some(config) = &config {
         items.push(check_voice_pack(&root, config));
         items.push(check_voiceprint(&root, config));
+        items.push(check_commands(&root, config));
     }
 
     (header, items)
@@ -197,6 +199,34 @@ fn check_voice_pack(root: &Path, config: &Config) -> Item {
         }
         Err(e) => Item::new(Status::Fail, TITLE, error_chain(&e)),
     }
+}
+
+fn check_commands(root: &Path, config: &Config) -> Item {
+    const TITLE: &str = "Команды";
+    let registry = Registry::load(&resolve(root, &config.paths.commands));
+    let packs: std::collections::BTreeSet<&str> =
+        registry.commands.iter().map(|c| c.pack.as_str()).collect();
+    let summary = format!(
+        "{} команд в пакетах: {}",
+        registry.commands.len(),
+        packs.into_iter().collect::<Vec<_>>().join(", ")
+    );
+    let mut notes: Vec<String> = registry
+        .errors
+        .iter()
+        .map(|e| format!("пропущено: {e}"))
+        .collect();
+    notes.extend(registry.warnings.iter().cloned());
+    let status = match (
+        registry.commands.is_empty(),
+        registry.errors.is_empty(),
+        registry.warnings.is_empty(),
+    ) {
+        (true, _, _) => Status::Fail,
+        (false, false, _) | (false, true, false) => Status::Warn,
+        (false, true, true) => Status::Ok,
+    };
+    Item::new(status, TITLE, summary).with_notes(notes)
 }
 
 fn check_voiceprint(root: &Path, config: &Config) -> Item {

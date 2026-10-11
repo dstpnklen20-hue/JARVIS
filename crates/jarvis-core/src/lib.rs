@@ -4,6 +4,7 @@
 //! описание скачиваемых ресурсов (модели, нативные библиотеки).
 
 pub mod assets;
+pub mod commands;
 pub mod config;
 pub mod logging;
 pub mod root;

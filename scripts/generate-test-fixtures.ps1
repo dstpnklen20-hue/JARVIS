@@ -50,6 +50,22 @@ Make negative pavel_story        $pavel ('Жили-были старик со с
     'Раз он в море закинул невод, пришёл невод с одною тиной. ' +
     'Он в другой раз закинул невод, пришёл невод с травой морскою.')
 
+# Команды без «Джарвис» (режим ожидания команды и FOLLOW_UP).
+# Имя файла = ожидаемый id команды из commands/ (или unknown_*).
+Make commands open_youtube__pavel        $pavel 'Открой ютуб.'
+Make commands open_youtube__irina_filler $irina 'Ну открой, пожалуйста, ютуб.'
+Make commands open_youtube__pavel_order  $pavel 'Ютуб открой.'
+Make commands open_google__irina         $irina 'Открой гугл.'
+Make commands media_play_pause__pavel    $pavel 'Включи музыку.'
+Make commands media_play_pause__irina    $irina 'Поставь на паузу.'
+Make commands media_next__pavel          $pavel 'Следующий трек.'
+Make commands media_previous__irina      $irina 'Предыдущий трек.'
+Make commands media_volume_up__pavel     $pavel 'Сделай громче.'
+Make commands media_volume_down__irina   $irina 'Тише.'
+Make commands media_mute__pavel          $pavel 'Выключи звук.'
+Make commands unknown_bread__irina       $irina 'Купи хлеба и молока.'
+Make commands unknown_weather__pavel     $pavel 'Какая завтра погода в Москве?'
+
 # Образцы для --enroll: один голос, разная подача.
 $i = 1
 foreach ($p in @(@(1.0, 0), @(0.9, -5), @(1.15, 5), @(1.0, -10), @(0.85, 3))) {
