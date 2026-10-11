@@ -8,12 +8,13 @@
 //! - Разрешения здесь не хранятся и храниться не могут (раздел 2.2): в
 //!   манифесте есть только пометка автора `always_ask`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::slots::{SlotSpec, placeholders};
 use crate::state::Reply;
 
 pub const MANIFEST_FILE: &str = "command.toml";
@@ -40,6 +41,9 @@ struct CommandFile {
     reply: String,
     #[serde(default)]
     always_ask: bool,
+    /// Параметры из речи: «громкость на {level}» (раздел 2.5).
+    #[serde(default)]
+    slots: BTreeMap<String, SlotSpec>,
     action: ActionSpec,
 }
 
@@ -47,7 +51,7 @@ fn default_reply() -> String {
     Reply::Done.key().to_owned()
 }
 
-/// Действие команды (раздел 6 ТЗ). Этап 2: `say`, `open_url`, `media`.
+/// Действие команды (раздел 6 ТЗ).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionSpec {
@@ -58,12 +62,52 @@ pub enum ActionSpec {
     },
     /// Открыть адрес в браузере по умолчанию.
     OpenUrl { url: String },
-    /// Мультимедиа-клавиши: пауза, треки, громкость.
+    /// Мультимедиа-клавиши и громкость.
     Media {
         operation: MediaOp,
-        /// Сколько нажатий для громкости (одно ≈ 2 %).
+        /// Сколько нажатий для volume_up/volume_down (одно ≈ 2 %).
         steps: Option<u32>,
+        /// Уровень для volume_set: 0–100 или слот («{level}»).
+        level: Option<String>,
     },
+    /// Запустить программу (не ждать её завершения).
+    LaunchApp {
+        /// Полный путь, путь внутри пакета или имя из PATH («notepad.exe»).
+        path: String,
+        #[serde(default)]
+        args: Vec<String>,
+        working_dir: Option<PathBuf>,
+    },
+    /// Запустить скрипт из папки пакета и дождаться его (с тайм-аутом).
+    RunScript {
+        /// Путь внутри папки пакета.
+        path: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+        /// Секунды (1–3600); по умолчанию 30.
+        timeout_sec: Option<u64>,
+    },
+    /// Нажать клавишу (скан-коды — работает в играх).
+    KeyPress {
+        key: String,
+        /// Сколько держать нажатой, мс (по умолчанию 30).
+        hold_ms: Option<u64>,
+        /// Сколько раз нажать (по умолчанию 1).
+        repeat: Option<u32>,
+        /// Пауза между нажатиями, мс (по умолчанию 50).
+        interval_ms: Option<u64>,
+    },
+    /// Нажать сочетание: клавиши нажимаются по порядку, отпускаются в обратном.
+    Hotkey {
+        keys: Vec<String>,
+        hold_ms: Option<u64>,
+    },
+    /// Питание: блокировка, сон, выход, перезагрузка, выключение.
+    SystemPower { operation: PowerOp },
+    /// Пауза (имеет смысл внутри `sequence`).
+    Wait { ms: u64 },
+    /// Цепочка действий по порядку; ошибка любого шага прерывает цепочку.
+    Sequence { steps: Vec<ActionSpec> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -75,6 +119,8 @@ pub enum MediaOp {
     Stop,
     VolumeUp,
     VolumeDown,
+    /// Установить громкость точно (`level`).
+    VolumeSet,
     Mute,
 }
 
@@ -84,6 +130,23 @@ impl MediaOp {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerOp {
+    Lock,
+    Sleep,
+    Logoff,
+    Restart,
+    Shutdown,
+}
+
+pub const DEFAULT_SCRIPT_TIMEOUT_SEC: u64 = 30;
+pub const MAX_SCRIPT_TIMEOUT_SEC: u64 = 3600;
+pub const MAX_WAIT_MS: u64 = 60_000;
+pub const MAX_KEY_HOLD_MS: u64 = 10_000;
+pub const MAX_KEY_REPEAT: u32 = 100;
+pub const MAX_SEQUENCE_STEPS: usize = 50;
+
 impl ActionSpec {
     /// Что произойдёт — для журнала и вопроса-разрешения.
     pub fn summary(&self) -> String {
@@ -92,11 +155,123 @@ impl ActionSpec {
             ActionSpec::Say { file: Some(f), .. } => format!("проиграет {}", f.display()),
             ActionSpec::Say { .. } => "ничего не скажет".into(),
             ActionSpec::OpenUrl { url } => format!("откроет {url}"),
-            ActionSpec::Media { operation, steps } => match steps {
+            ActionSpec::Media {
+                operation: MediaOp::VolumeSet,
+                level,
+                ..
+            } => format!("установит громкость {}%", level.as_deref().unwrap_or("?")),
+            ActionSpec::Media {
+                operation, steps, ..
+            } => match steps {
                 Some(n) => format!("нажмёт {operation:?} ×{n}"),
                 None => format!("нажмёт {operation:?}"),
             },
+            ActionSpec::LaunchApp { path, args, .. } => {
+                format!("запустит {path}{}", args_text(args))
+            }
+            ActionSpec::RunScript {
+                path,
+                args,
+                timeout_sec,
+            } => format!(
+                "выполнит скрипт {}{} (не дольше {} с)",
+                path.display(),
+                args_text(args),
+                timeout_sec.unwrap_or(DEFAULT_SCRIPT_TIMEOUT_SEC)
+            ),
+            ActionSpec::KeyPress { key, repeat, .. } => match repeat {
+                Some(n) if *n > 1 => format!("нажмёт клавишу {key} ×{n}"),
+                _ => format!("нажмёт клавишу {key}"),
+            },
+            ActionSpec::Hotkey { keys, .. } => format!("нажмёт {}", keys.join("+")),
+            ActionSpec::SystemPower { operation } => match operation {
+                PowerOp::Lock => "заблокирует компьютер".into(),
+                PowerOp::Sleep => "переведёт компьютер в сон".into(),
+                PowerOp::Logoff => "выйдет из учётной записи".into(),
+                PowerOp::Restart => "перезагрузит компьютер".into(),
+                PowerOp::Shutdown => "выключит компьютер".into(),
+            },
+            ActionSpec::Wait { ms } => format!("подождёт {ms} мс"),
+            ActionSpec::Sequence { steps } => steps
+                .iter()
+                .map(ActionSpec::summary)
+                .collect::<Vec<_>>()
+                .join(", затем "),
         }
+    }
+
+    /// Все строки действия, в которые можно подставлять слоты.
+    fn slot_targets(&self) -> Vec<&str> {
+        match self {
+            ActionSpec::OpenUrl { url } => vec![url.as_str()],
+            ActionSpec::Media { level: Some(l), .. } => vec![l.as_str()],
+            ActionSpec::LaunchApp { args, .. } | ActionSpec::RunScript { args, .. } => {
+                args.iter().map(String::as_str).collect()
+            }
+            ActionSpec::Sequence { steps } => {
+                steps.iter().flat_map(ActionSpec::slot_targets).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Пути к файлам внутри папки пакета (для отпечатка разрешения).
+    pub fn pack_files(&self) -> Vec<&Path> {
+        match self {
+            ActionSpec::RunScript { path, .. } => vec![path.as_path()],
+            ActionSpec::Say { file: Some(f), .. } => vec![f.as_path()],
+            ActionSpec::Sequence { steps } => {
+                steps.iter().flat_map(ActionSpec::pack_files).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Действие с подставленными значениями слотов («{level}» → «40»).
+    pub fn with_slots(&self, values: &crate::slots::SlotValues) -> ActionSpec {
+        let fill = |s: &String| crate::slots::fill(s, values);
+        match self {
+            ActionSpec::OpenUrl { url } => ActionSpec::OpenUrl { url: fill(url) },
+            ActionSpec::Media {
+                operation,
+                steps,
+                level,
+            } => ActionSpec::Media {
+                operation: *operation,
+                steps: *steps,
+                level: level.as_ref().map(fill),
+            },
+            ActionSpec::LaunchApp {
+                path,
+                args,
+                working_dir,
+            } => ActionSpec::LaunchApp {
+                path: path.clone(),
+                args: args.iter().map(fill).collect(),
+                working_dir: working_dir.clone(),
+            },
+            ActionSpec::RunScript {
+                path,
+                args,
+                timeout_sec,
+            } => ActionSpec::RunScript {
+                path: path.clone(),
+                args: args.iter().map(fill).collect(),
+                timeout_sec: *timeout_sec,
+            },
+            ActionSpec::Sequence { steps } => ActionSpec::Sequence {
+                steps: steps.iter().map(|s| s.with_slots(values)).collect(),
+            },
+            other => other.clone(),
+        }
+    }
+}
+
+fn args_text(args: &[String]) -> String {
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!(" с аргументами {}", args.join(" "))
     }
 }
 
@@ -115,6 +290,8 @@ pub struct Command {
     pub description: String,
     pub reply: ReplyChoice,
     pub always_ask: bool,
+    /// Слоты: имя → тип и допустимые значения.
+    pub slots: BTreeMap<String, SlotSpec>,
     pub action: ActionSpec,
     /// Папка пакета — от неё считаются пути в действиях.
     pub dir: PathBuf,
@@ -281,7 +458,10 @@ fn validate(cmd: CommandFile, pack: &str, dir: &Path) -> Result<Command, String>
         },
     };
 
-    if let Err(message) = validate_action(&cmd.action, dir) {
+    if let Err(message) = validate_slots(&cmd.slots, &phrases, &cmd.action) {
+        return err(message);
+    }
+    if let Err(message) = validate_action(&cmd.action, dir, &cmd.slots, false) {
         return err(message);
     }
 
@@ -292,12 +472,52 @@ fn validate(cmd: CommandFile, pack: &str, dir: &Path) -> Result<Command, String>
         description: cmd.description.trim().to_owned(),
         reply,
         always_ask: cmd.always_ask,
+        slots: cmd.slots,
         action: cmd.action,
         dir: dir.to_path_buf(),
     })
 }
 
-fn validate_action(action: &ActionSpec, dir: &Path) -> Result<(), String> {
+/// Слоты объявлены, использованы и упомянуты только там, где можно.
+fn validate_slots(
+    slots: &BTreeMap<String, SlotSpec>,
+    phrases: &[String],
+    action: &ActionSpec,
+) -> Result<(), String> {
+    for (name, spec) in slots {
+        spec.validate(name)?;
+        if !phrases
+            .iter()
+            .any(|p| placeholders(p).contains(&name.as_str()))
+        {
+            return Err(format!("слот `{name}` не встречается ни в одной фразе"));
+        }
+    }
+    for phrase in phrases {
+        if let Some(bad) = placeholders(phrase)
+            .into_iter()
+            .find(|p| !slots.contains_key(*p))
+        {
+            return Err(format!("во фразе «{phrase}» слот `{bad}` не объявлен"));
+        }
+    }
+    if let Some(bad) = action
+        .slot_targets()
+        .into_iter()
+        .flat_map(placeholders)
+        .find(|p| !slots.contains_key(*p))
+    {
+        return Err(format!("в действии слот `{bad}` не объявлен"));
+    }
+    Ok(())
+}
+
+fn validate_action(
+    action: &ActionSpec,
+    dir: &Path,
+    slots: &BTreeMap<String, SlotSpec>,
+    in_sequence: bool,
+) -> Result<(), String> {
     match action {
         ActionSpec::Say { reply, file } => match (reply, file) {
             (Some(_), Some(_)) | (None, None) => {
@@ -317,13 +537,211 @@ fn validate_action(action: &ActionSpec, dir: &Path) -> Result<(), String> {
             }
         },
         ActionSpec::OpenUrl { url } => validate_url(url),
-        ActionSpec::Media { operation, steps } => match (operation.is_volume(), steps) {
-            (false, Some(_)) => Err("media: steps бывает только у volume_up/volume_down".into()),
-            (true, Some(n)) if !(1..=MAX_VOLUME_STEPS).contains(n) => Err(format!(
-                "media: steps = {n} вне диапазона 1–{MAX_VOLUME_STEPS}"
-            )),
-            _ => Ok(()),
+        ActionSpec::Media {
+            operation,
+            steps,
+            level,
+        } => {
+            match (operation.is_volume(), steps) {
+                (false, Some(_)) => {
+                    return Err("media: steps бывает только у volume_up/volume_down".into());
+                }
+                (true, Some(n)) if !(1..=MAX_VOLUME_STEPS).contains(n) => {
+                    return Err(format!(
+                        "media: steps = {n} вне диапазона 1–{MAX_VOLUME_STEPS}"
+                    ));
+                }
+                _ => {}
+            }
+            match (operation, level) {
+                (MediaOp::VolumeSet, None) => Err("media: volume_set требует level".into()),
+                (MediaOp::VolumeSet, Some(level)) => validate_level(level, slots),
+                (_, Some(_)) => Err("media: level бывает только у volume_set".into()),
+                (_, None) => Ok(()),
+            }
+        }
+        ActionSpec::LaunchApp {
+            path,
+            args: _,
+            working_dir,
+        } => {
+            no_slots_in_path(path)?;
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Err("launch_app: пустой путь".into());
+            }
+            let as_path = Path::new(trimmed);
+            let has_dir = trimmed.contains(['\\', '/']);
+            if as_path.is_absolute() {
+                if !as_path.is_file() {
+                    return Err(format!("launch_app: программы {trimmed} нет"));
+                }
+            } else if has_dir {
+                let full = inside_dir(dir, as_path)?;
+                if !full.is_file() {
+                    return Err(format!("launch_app: программы {} нет", full.display()));
+                }
+            }
+            // Голое имя («notepad.exe») ищется в PATH при запуске.
+            if let Some(wd) = working_dir {
+                no_slots_in_path(&wd.to_string_lossy())?;
+                if !wd.is_dir() {
+                    return Err(format!("launch_app: папки {} нет", wd.display()));
+                }
+            }
+            Ok(())
+        }
+        ActionSpec::RunScript {
+            path,
+            args,
+            timeout_sec,
+        } => {
+            no_slots_in_path(&path.to_string_lossy())?;
+            let full = inside_dir(dir, path)?;
+            if !full.is_file() {
+                return Err(format!("run_script: скрипта {} нет", full.display()));
+            }
+            let kind = ScriptKind::of(path).ok_or_else(|| {
+                format!(
+                    "run_script: {} — поддерживаются .exe, .bat, .cmd, .ps1, .py",
+                    path.display()
+                )
+            })?;
+            if let Some(t) = timeout_sec
+                && !(1..=MAX_SCRIPT_TIMEOUT_SEC).contains(t)
+            {
+                return Err(format!(
+                    "run_script: timeout_sec = {t} вне диапазона 1–{MAX_SCRIPT_TIMEOUT_SEC}"
+                ));
+            }
+            if kind == ScriptKind::Batch
+                && let Some(bad) = args.iter().find(|a| a.contains(BATCH_METACHARS))
+            {
+                // cmd.exe заново разбирает строку — спецсимволы стали бы командами.
+                return Err(format!(
+                    "run_script: в аргументе «{bad}» для .bat/.cmd недопустимы символы {BATCH_METACHARS:?}"
+                ));
+            }
+            Ok(())
+        }
+        ActionSpec::KeyPress {
+            key,
+            hold_ms,
+            repeat,
+            interval_ms,
+        } => {
+            known_key(key)?;
+            if hold_ms.is_some_and(|h| h > MAX_KEY_HOLD_MS) {
+                return Err(format!("key_press: hold_ms больше {MAX_KEY_HOLD_MS}"));
+            }
+            if let Some(r) = repeat
+                && !(1..=MAX_KEY_REPEAT).contains(r)
+            {
+                return Err(format!(
+                    "key_press: repeat = {r} вне диапазона 1–{MAX_KEY_REPEAT}"
+                ));
+            }
+            if interval_ms.is_some_and(|i| i > MAX_KEY_HOLD_MS) {
+                return Err(format!("key_press: interval_ms больше {MAX_KEY_HOLD_MS}"));
+            }
+            Ok(())
+        }
+        ActionSpec::Hotkey { keys, hold_ms } => {
+            if !(1..=5).contains(&keys.len()) {
+                return Err("hotkey: от 1 до 5 клавиш".into());
+            }
+            for key in keys {
+                known_key(key)?;
+            }
+            let unique: HashSet<String> = keys.iter().map(|k| k.to_ascii_lowercase()).collect();
+            if unique.len() != keys.len() {
+                return Err("hotkey: клавиши повторяются".into());
+            }
+            if hold_ms.is_some_and(|h| h > MAX_KEY_HOLD_MS) {
+                return Err(format!("hotkey: hold_ms больше {MAX_KEY_HOLD_MS}"));
+            }
+            Ok(())
+        }
+        ActionSpec::SystemPower { .. } => Ok(()),
+        ActionSpec::Wait { ms } => {
+            if *ms > MAX_WAIT_MS {
+                return Err(format!("wait: ms больше {MAX_WAIT_MS}"));
+            }
+            Ok(())
+        }
+        ActionSpec::Sequence { steps } => {
+            if in_sequence {
+                return Err("sequence: вложенные цепочки не поддерживаются".into());
+            }
+            if !(1..=MAX_SEQUENCE_STEPS).contains(&steps.len()) {
+                return Err(format!("sequence: от 1 до {MAX_SEQUENCE_STEPS} шагов"));
+            }
+            for (i, step) in steps.iter().enumerate() {
+                validate_action(step, dir, slots, true)
+                    .map_err(|e| format!("шаг {}: {e}", i + 1))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Спецсимволы cmd.exe, недопустимые в аргументах .bat/.cmd.
+pub const BATCH_METACHARS: &[char] = &['&', '|', '<', '>', '^', '%', '"', '\n', '\r'];
+
+/// Чем запускать скрипт.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptKind {
+    Exe,
+    Batch,
+    PowerShell,
+    Python,
+}
+
+impl ScriptKind {
+    pub fn of(path: &Path) -> Option<Self> {
+        let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+        Some(match ext.as_str() {
+            "exe" => ScriptKind::Exe,
+            "bat" | "cmd" => ScriptKind::Batch,
+            "ps1" => ScriptKind::PowerShell,
+            "py" => ScriptKind::Python,
+            _ => return None,
+        })
+    }
+}
+
+fn known_key(key: &str) -> Result<(), String> {
+    crate::keys::vk_code(key)
+        .map(|_| ())
+        .ok_or_else(|| format!("неизвестная клавиша «{key}»"))
+}
+
+fn no_slots_in_path(path: &str) -> Result<(), String> {
+    if path.contains('{') {
+        return Err(format!(
+            "в пути «{path}» нельзя подставлять слоты — только в аргументы"
+        ));
+    }
+    Ok(())
+}
+
+/// Уровень громкости: число 0–100 или числовой слот в пределах 0–100.
+fn validate_level(level: &str, slots: &BTreeMap<String, SlotSpec>) -> Result<(), String> {
+    let names = placeholders(level);
+    match names.as_slice() {
+        [] => match level.trim().parse::<u32>() {
+            Ok(0..=100) => Ok(()),
+            _ => Err(format!("media: level = «{level}» — нужно число 0–100")),
         },
+        [name] if level.trim() == format!("{{{name}}}") => match slots.get(*name) {
+            Some(SlotSpec::Number { min, max }) if *min >= 0 && *max <= 100 => Ok(()),
+            Some(SlotSpec::Number { .. }) => {
+                Err(format!("media: слот `{name}` должен быть в пределах 0–100"))
+            }
+            Some(_) => Err(format!("media: слот `{name}` должен быть числом")),
+            None => Err(format!("media: слот `{name}` не объявлен")),
+        },
+        _ => Err(format!("media: level = «{level}» — число или один слот")),
     }
 }
 
@@ -562,5 +980,268 @@ operation = "next"
         assert!(r.warnings.is_empty(), "{:#?}", r.warnings);
         assert!(r.get("open_youtube").is_some());
         assert!(r.get("media_play_pause").is_some());
+    }
+
+    /// Манифест с одной командой и заданным действием (и слотами) в папке `dir`.
+    fn one(dir: &Path, phrases: &str, slots: &str, action: &str) -> Registry {
+        let text = format!(
+            "pack = \"t\"\nversion = 1\n[[command]]\nid = \"c\"\nphrases = [{phrases}]\n\
+             description = \"d\"\n{slots}\n[command.action]\n{action}\n"
+        );
+        let mut r = Registry::default();
+        r.add_manifest(&dir.join("command.toml"), &text);
+        r
+    }
+
+    fn ok(r: &Registry) {
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(r.commands.len(), 1);
+    }
+
+    fn fails(r: &Registry, needle: &str) {
+        assert!(r.commands.is_empty(), "ожидали ошибку «{needle}»");
+        assert!(r.errors[0].message.contains(needle), "{:?}", r.errors);
+    }
+
+    #[test]
+    fn run_script_inside_pack_with_known_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.ps1"), "").unwrap();
+        std::fs::write(dir.path().join("b.bat"), "").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "").unwrap();
+        let d = dir.path();
+        ok(&one(
+            d,
+            "\"скрипт\"",
+            "",
+            "type = \"run_script\"\npath = \"a.ps1\"\ntimeout_sec = 5",
+        ));
+        fails(
+            &one(
+                d,
+                "\"скрипт\"",
+                "",
+                "type = \"run_script\"\npath = \"нет.ps1\"",
+            ),
+            "нет",
+        );
+        fails(
+            &one(
+                d,
+                "\"скрипт\"",
+                "",
+                "type = \"run_script\"\npath = \"c.txt\"",
+            ),
+            "поддерживаются",
+        );
+        fails(
+            &one(
+                d,
+                "\"скрипт\"",
+                "",
+                "type = \"run_script\"\npath = \"../a.ps1\"",
+            ),
+            "внутри",
+        );
+        fails(
+            &one(
+                d,
+                "\"скрипт\"",
+                "",
+                "type = \"run_script\"\npath = \"a.ps1\"\ntimeout_sec = 0",
+            ),
+            "timeout_sec",
+        );
+        fails(
+            &one(
+                d,
+                "\"скрипт\"",
+                "",
+                "type = \"run_script\"\npath = \"b.bat\"\nargs = [\"x & calc\"]",
+            ),
+            "недопустимы",
+        );
+    }
+
+    #[test]
+    fn launch_app_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool.exe"), "").unwrap();
+        let d = dir.path();
+        ok(&one(
+            d,
+            "\"блокнот\"",
+            "",
+            "type = \"launch_app\"\npath = \"notepad.exe\"\nargs = [\"a.txt\"]",
+        ));
+        ok(&one(
+            d,
+            "\"тул\"",
+            "",
+            "type = \"launch_app\"\npath = \"./tool.exe\"",
+        ));
+        fails(
+            &one(
+                d,
+                "\"тул\"",
+                "",
+                "type = \"launch_app\"\npath = \"bin/../tool.exe\"",
+            ),
+            "внутри",
+        );
+        fails(
+            &one(
+                d,
+                "\"нет\"",
+                "",
+                "type = \"launch_app\"\npath = \"C:\\\\нет\\\\x.exe\"",
+            ),
+            "нет",
+        );
+        fails(
+            &one(d, "\"пусто\"", "", "type = \"launch_app\"\npath = \"\""),
+            "пустой",
+        );
+    }
+
+    #[test]
+    fn keys_and_hotkeys() {
+        let d = Path::new(".");
+        ok(&one(
+            d,
+            "\"прыжок\"",
+            "",
+            "type = \"key_press\"\nkey = \"space\"\nhold_ms = 100\nrepeat = 2",
+        ));
+        ok(&one(
+            d,
+            "\"сохрани\"",
+            "",
+            "type = \"hotkey\"\nkeys = [\"ctrl\", \"s\"]",
+        ));
+        fails(
+            &one(d, "\"x\"", "", "type = \"key_press\"\nkey = \"банан\""),
+            "неизвестная клавиша",
+        );
+        fails(
+            &one(
+                d,
+                "\"x\"",
+                "",
+                "type = \"hotkey\"\nkeys = [\"ctrl\", \"ctrl\"]",
+            ),
+            "повторяются",
+        );
+        fails(
+            &one(d, "\"x\"", "", "type = \"hotkey\"\nkeys = []"),
+            "от 1 до 5",
+        );
+        fails(
+            &one(
+                d,
+                "\"x\"",
+                "",
+                "type = \"key_press\"\nkey = \"a\"\nrepeat = 0",
+            ),
+            "repeat",
+        );
+    }
+
+    #[test]
+    fn sequence_and_wait() {
+        let d = Path::new(".");
+        let seq = "type = \"sequence\"\n[[command.action.steps]]\ntype = \"hotkey\"\nkeys = [\"win\", \"d\"]\n\
+                   [[command.action.steps]]\ntype = \"wait\"\nms = 300\n\
+                   [[command.action.steps]]\ntype = \"open_url\"\nurl = \"https://ya.ru\"";
+        let r = one(d, "\"рабочий стол\"", "", seq);
+        ok(&r);
+        assert!(r.commands[0].action.summary().contains("затем"));
+        let nested = "type = \"sequence\"\n[[command.action.steps]]\ntype = \"sequence\"\n\
+                      [[command.action.steps.steps]]\ntype = \"wait\"\nms = 1";
+        fails(&one(d, "\"x\"", "", nested), "вложенные");
+        let bad_step =
+            "type = \"sequence\"\n[[command.action.steps]]\ntype = \"wait\"\nms = 999999";
+        fails(&one(d, "\"x\"", "", bad_step), "шаг 1");
+    }
+
+    #[test]
+    fn slots_are_declared_used_and_kept_out_of_paths() {
+        let d = Path::new(".");
+        let level = "[command.slots.level]\ntype = \"number\"\nmin = 0\nmax = 100";
+        let set = "type = \"media\"\noperation = \"volume_set\"\nlevel = \"{level}\"";
+        let r = one(d, "\"громкость на {level}\"", level, set);
+        ok(&r);
+        assert!(r.commands[0].slots.contains_key("level"));
+
+        fails(&one(d, "\"громкость\"", level, set), "не встречается");
+        fails(
+            &one(d, "\"громкость на {level} {lvl}\"", level, set),
+            "не объявлен",
+        );
+        let wide = "[command.slots.level]\ntype = \"number\"\nmin = 0\nmax = 1000";
+        fails(&one(d, "\"громкость на {level}\"", wide, set), "0–100");
+        fails(
+            &one(
+                d,
+                "\"громкость на {level}\"",
+                level,
+                "type = \"media\"\noperation = \"volume_set\"",
+            ),
+            "требует level",
+        );
+        fails(
+            &one(
+                d,
+                "\"запусти {level}\"",
+                level,
+                "type = \"launch_app\"\npath = \"{level}.exe\"",
+            ),
+            "нельзя подставлять",
+        );
+    }
+
+    #[test]
+    fn slot_values_fill_action() {
+        let d = Path::new(".");
+        let site =
+            "[command.slots.site]\ntype = \"choice\"\nvalues = { \"ютуб\" = \"youtube.com\" }";
+        let r = one(
+            d,
+            "\"открой сайт {site}\"",
+            site,
+            "type = \"open_url\"\nurl = \"https://{site}\"",
+        );
+        ok(&r);
+        let values: crate::slots::SlotValues = [("site".to_owned(), "youtube.com".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            r.commands[0].action.with_slots(&values),
+            ActionSpec::OpenUrl {
+                url: "https://youtube.com".into()
+            }
+        );
+    }
+
+    #[test]
+    fn power_operations() {
+        let d = Path::new(".");
+        for op in ["lock", "sleep", "logoff", "restart", "shutdown"] {
+            ok(&one(
+                d,
+                "\"питание\"",
+                "",
+                &format!("type = \"system_power\"\noperation = \"{op}\""),
+            ));
+        }
+        fails(
+            &one(
+                d,
+                "\"x\"",
+                "",
+                "type = \"system_power\"\noperation = \"explode\"",
+            ),
+            "explode",
+        );
     }
 }

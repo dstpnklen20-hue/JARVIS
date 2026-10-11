@@ -51,6 +51,20 @@ operation = "volume_down"
 steps = 5
 
 [[command]]
+id = "media_volume_set"
+phrases = ["громкость на {level}", "поставь громкость на {level}", "сделай громкость {level}", "громкость {level} процентов"]
+description = "установит громкость"
+reply = "none"
+[command.slots.level]
+type = "number"
+min = 0
+max = 100
+[command.action]
+type = "media"
+operation = "volume_set"
+level = "{level}"
+
+[[command]]
 id = "media_mute"
 phrases = ["выключи звук", "включи звук", "без звука"]
 description = "выключит или включит звук"

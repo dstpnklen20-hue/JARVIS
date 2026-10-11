@@ -54,6 +54,7 @@ impl Indicator {
 pub enum MenuAction {
     TogglePause,
     ForgetPermissions,
+    ReloadCommands,
     Quit,
 }
 
@@ -61,6 +62,7 @@ pub struct Tray {
     icon: TrayIcon,
     pause: CheckMenuItem,
     forget: MenuItem,
+    reload: MenuItem,
     quit: MenuItem,
     shown: Indicator,
 }
@@ -68,11 +70,18 @@ pub struct Tray {
 impl Tray {
     pub fn new() -> anyhow::Result<Self> {
         let pause = CheckMenuItem::new("Пауза", true, false, None);
+        let reload = MenuItem::new("Обновить команды", true, None);
         let forget = MenuItem::new("Забыть разрешения", true, None);
         let quit = MenuItem::new("Выход", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&pause, &forget, &PredefinedMenuItem::separator(), &quit])
-            .context("не удалось создать меню трея")?;
+        menu.append_items(&[
+            &pause,
+            &reload,
+            &forget,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])
+        .context("не удалось создать меню трея")?;
         let shown = Indicator::Starting;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -83,6 +92,7 @@ impl Tray {
         Ok(Self {
             icon,
             pause,
+            reload,
             forget,
             quit,
             shown,
@@ -110,6 +120,8 @@ impl Tray {
         let event = MenuEvent::receiver().try_recv().ok()?;
         if event.id == *self.pause.id() {
             Some(MenuAction::TogglePause)
+        } else if event.id == *self.reload.id() {
+            Some(MenuAction::ReloadCommands)
         } else if event.id == *self.forget.id() {
             Some(MenuAction::ForgetPermissions)
         } else if event.id == *self.quit.id() {

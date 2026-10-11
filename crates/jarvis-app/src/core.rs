@@ -6,20 +6,25 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use std::path::PathBuf;
+
 use anyhow::Context as _;
-use jarvis_actions::{ActionError, Outcome, Sound, System};
+use jarvis_actions::{ActionError, CancelToken, Outcome, Sound, System};
 use jarvis_app::resolver::{
-    BUILTIN_FORGET_PERMISSIONS, BUILTIN_STOP, CommandResolver, EarlyDecider, Resolution, is_builtin,
+    BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS, BUILTIN_STOP, CommandResolver,
+    EarlyDecider, Resolution, hotword_phrases, is_builtin,
 };
 use jarvis_app::system::PlatformSystem;
 use jarvis_audio::pack::VoicePack;
 use jarvis_audio::pipeline::{MuteGate, Pipeline, PipelineEvent, PipelineSettings, WakeEvent};
 use jarvis_audio::player::Player;
 use jarvis_audio::stt::Transcript;
+use jarvis_audio::wake::WakeMatcher;
 use jarvis_core::Config;
 use jarvis_core::commands::{ActionSpec, Command, Registry, ReplyChoice};
 use jarvis_core::journal::{self, ActionJournal, AnswerSource, Entry, PermissionNote};
 use jarvis_core::permissions::{Answer, PermissionStore, Verdict};
+use jarvis_core::slots::SlotValues;
 use jarvis_core::state::{Effect, Event, Reply, State, Timings, transition};
 use jarvis_nlu::answers::{PermissionReply, parse_reply};
 use jarvis_platform::{DialogButton, DialogHandle, DialogSpec, Waker};
@@ -51,9 +56,12 @@ pub enum CoreMsg {
         generation: u64,
         button: Option<i32>,
     },
+    /// Звук из шага цепочки (`say` внутри `sequence`).
+    PlaySound(Sound),
     TogglePause,
     EmergencyStop,
     ForgetPermissions,
+    ReloadCommands,
     Shutdown,
 }
 
@@ -66,15 +74,19 @@ pub struct CoreParams {
     pub permissions: PermissionStore,
     pub journal: Option<ActionJournal>,
     pub config: Config,
+    /// Для перезагрузки команд: папка команд, слова активации.
+    pub commands_dir: PathBuf,
+    pub wake_matcher: WakeMatcher,
     pub ui: Sender<Indicator>,
     pub waker: Waker,
 }
 
-/// Что услышали — для журнала.
+/// Что услышали — для журнала и подстановки слотов.
 #[derive(Debug, Clone)]
 struct Heard {
     text: String,
     score: f32,
+    slots: SlotValues,
     at: Instant,
 }
 
@@ -97,7 +109,34 @@ struct Running {
     /// `None` — встроенная команда.
     command: Option<Command>,
     started: Instant,
+    /// Дольше — действие считается зависшим.
+    deadline: Duration,
     approval: Approval,
+}
+
+/// Сколько действие может длиться законно (плюс запас) — для сторожа ядра.
+fn expected_duration(action: &ActionSpec) -> Duration {
+    use jarvis_core::commands::DEFAULT_SCRIPT_TIMEOUT_SEC;
+    match action {
+        ActionSpec::RunScript { timeout_sec, .. } => {
+            Duration::from_secs(timeout_sec.unwrap_or(DEFAULT_SCRIPT_TIMEOUT_SEC) + 5)
+        }
+        ActionSpec::Wait { ms } => Duration::from_millis(*ms) + ACTION_TIMEOUT,
+        ActionSpec::KeyPress {
+            hold_ms,
+            repeat,
+            interval_ms,
+            ..
+        } => {
+            let per = hold_ms.unwrap_or(30) + interval_ms.unwrap_or(50);
+            Duration::from_millis(per * u64::from(repeat.unwrap_or(1))) + ACTION_TIMEOUT
+        }
+        ActionSpec::Hotkey { hold_ms, .. } => {
+            Duration::from_millis(hold_ms.unwrap_or(30)) + ACTION_TIMEOUT
+        }
+        ActionSpec::Sequence { steps } => steps.iter().map(expected_duration).sum(),
+        _ => ACTION_TIMEOUT,
+    }
 }
 
 pub struct Core {
@@ -114,6 +153,11 @@ pub struct Core {
     dry_run: bool,
     permissions: PermissionStore,
     journal: Option<ActionJournal>,
+    config: Config,
+    commands_dir: PathBuf,
+    wake_matcher: WakeMatcher,
+    /// Отмена текущего действия (аварийная остановка).
+    cancel: Option<CancelToken>,
     events: Sender<CoreMsg>,
     /// Номер текущего действия: поздний результат старого игнорируется.
     generation: u64,
@@ -168,6 +212,10 @@ impl Core {
             dry_run: p.config.general.dry_run,
             permissions: p.permissions,
             journal: p.journal,
+            config: p.config.clone(),
+            commands_dir: p.commands_dir,
+            wake_matcher: p.wake_matcher,
+            cancel: None,
             events,
             generation: 0,
             executing: None,
@@ -189,6 +237,11 @@ impl Core {
                 Ok(CoreMsg::TogglePause) => self.apply(Event::TogglePause),
                 Ok(CoreMsg::EmergencyStop) => self.emergency_stop("горячая клавиша"),
                 Ok(CoreMsg::ForgetPermissions) => self.forget_permissions("трей"),
+                Ok(CoreMsg::ReloadCommands) => {
+                    let ok = self.reload_commands("трей");
+                    self.play(if ok { Reply::Done } else { Reply::Failed });
+                }
+                Ok(CoreMsg::PlaySound(sound)) => self.play_sound(&sound),
                 Ok(CoreMsg::Pipeline(event)) => self.on_pipeline(event),
                 Ok(CoreMsg::ActionDone { generation, result }) => {
                     self.on_action_done(generation, result)
@@ -214,12 +267,15 @@ impl Core {
         {
             tracing::debug!(utterance, %id, "раннее решение по частичному тексту");
             let score = self.early_score();
-            self.command(id, String::new(), score, now);
+            self.command(id, String::new(), score, SlotValues::new(), now);
         }
         if let Some(running) = &self.executing
-            && running.started.elapsed() > ACTION_TIMEOUT
+            && running.started.elapsed() > running.deadline
         {
-            tracing::error!(command = %running.id, "действие не ответило за {ACTION_TIMEOUT:?}");
+            tracing::error!(command = %running.id, deadline = ?running.deadline, "действие не ответило вовремя");
+            if let Some(cancel) = &self.cancel {
+                cancel.cancel();
+            }
             if let Some(running) = self.executing.take() {
                 self.write_journal(
                     &running.approval,
@@ -341,7 +397,8 @@ impl Core {
                 .on_partial(t.utterance, &t.text, &resolution, instant, now)
             {
                 tracing::debug!(text = %t.text, %id, "решение по началу фразы");
-                self.command(id, t.text, score, now);
+                // Решение по началу фразы бывает только у команд без слотов.
+                self.command(id, t.text, score, SlotValues::new(), now);
             }
             return;
         }
@@ -350,7 +407,7 @@ impl Core {
         }
         tracing::info!(text = %t.text, ?resolution, "фраза");
         match resolution {
-            Resolution::Command { id, score } => self.command(id, t.text, score, now),
+            Resolution::Command { id, score, slots } => self.command(id, t.text, score, slots, now),
             Resolution::Ambiguous { first, second } => {
                 // Уточняющий вопрос голосом («X или Y?») — с синтезом речи (этап 5).
                 tracing::info!(%first, %second, "неоднозначно — переспрашиваю");
@@ -366,12 +423,29 @@ impl Core {
 
     // ---------- команды и разрешения ----------
 
-    fn command(&mut self, id: String, text: String, score: f32, at: Instant) {
+    fn command(&mut self, id: String, text: String, score: f32, slots: SlotValues, at: Instant) {
         self.early.clear();
-        let heard = Heard { text, score, at };
+        let heard = Heard {
+            text,
+            score,
+            slots,
+            at,
+        };
 
         if id == BUILTIN_STOP {
             self.emergency_stop("голос");
+            return;
+        }
+        if id == BUILTIN_RELOAD_COMMANDS {
+            // Безвредная встроенная команда — без вопроса.
+            let ok = self.reload_commands("голос");
+            let approval = Approval {
+                heard,
+                note: PermissionNote::Builtin,
+                answered_by: None,
+            };
+            self.write_journal(&approval, &id, if ok { "ok" } else { "failed" }, None);
+            self.play(if ok { Reply::Done } else { Reply::Failed });
             return;
         }
         if id == BUILTIN_FORGET_PERMISSIONS {
@@ -501,7 +575,12 @@ impl Core {
             let Some(command) = self.registry.get(id) else {
                 return;
             };
-            permission_dialog(command, offer_always)
+            let slots = self
+                .pending
+                .as_ref()
+                .map(|p| p.heard.slots.clone())
+                .unwrap_or_default();
+            permission_dialog(command, offer_always, &slots)
         };
         let events = self.events.clone();
         match jarvis_platform::show_dialog(spec, move |button| {
@@ -529,6 +608,7 @@ impl Core {
             heard: Heard {
                 text: String::new(),
                 score: 0.0,
+                slots: SlotValues::new(),
                 at: Instant::now(),
             },
             note: PermissionNote::Saved,
@@ -540,6 +620,7 @@ impl Core {
                 id: id.to_owned(),
                 command: None,
                 started: Instant::now(),
+                deadline: ACTION_TIMEOUT,
                 approval,
             });
             let result = match self.permissions.forget_all() {
@@ -556,9 +637,11 @@ impl Core {
         let Some(command) = self.registry.get(id).cloned() else {
             return;
         };
+        // Слоты подставляются только сейчас — в манифесте и разрешении шаблон.
+        let action = command.action.with_slots(&approval.heard.slots);
         tracing::info!(
             command = %command.id,
-            action = %command.action.summary(),
+            action = %action.summary(),
             permission = ?approval.note,
             "выполняю"
         );
@@ -567,6 +650,7 @@ impl Core {
             id: command.id.clone(),
             command: Some(command.clone()),
             started: Instant::now(),
+            deadline: expected_duration(&action),
             approval,
         });
 
@@ -577,18 +661,30 @@ impl Core {
             });
             return;
         }
+        let cancel = CancelToken::default();
+        self.cancel = Some(cancel.clone());
         let system = Arc::clone(&self.system);
         let events = self.events.clone();
+        let dir = command.dir.clone();
         let spawned = std::thread::Builder::new()
             .name("jarvis-action".into())
             .spawn(move || {
+                let play_events = events.clone();
+                let play = move |sound: Sound| {
+                    let _ = play_events.send(CoreMsg::PlaySound(sound));
+                };
+                let ctx = jarvis_actions::Context {
+                    dir: &dir,
+                    system: system.as_ref(),
+                    cancel: &cancel,
+                    play: &play,
+                };
                 // Паника в действии не должна ронять ядро (раздел 2.5 ТЗ).
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    jarvis_actions::execute(&command.action, &command.dir, system.as_ref())
-                }))
-                .unwrap_or_else(|_| {
-                    Err(ActionError::Invalid("действие завершилось паникой".into()))
-                });
+                let result =
+                    catch_unwind(AssertUnwindSafe(|| jarvis_actions::execute(&action, &ctx)))
+                        .unwrap_or_else(|_| {
+                            Err(ActionError::Invalid("действие завершилось паникой".into()))
+                        });
                 let _ = events.send(CoreMsg::ActionDone { generation, result });
             });
         if let Err(e) = spawned {
@@ -674,6 +770,39 @@ impl Core {
         self.apply(Event::EmergencyStop);
     }
 
+    /// «Обнови команды»: перечитать пакеты без перезапуска. `false` — не
+    /// загрузилось ни одной команды (старый набор остаётся).
+    fn reload_commands(&mut self, source: &str) -> bool {
+        let registry = jarvis_core::commands::Registry::load(&self.commands_dir);
+        for problem in &registry.errors {
+            tracing::error!("пропущено: {problem}");
+        }
+        for warning in &registry.warnings {
+            tracing::warn!("{warning}");
+        }
+        if registry.commands.is_empty() {
+            tracing::error!(
+                source,
+                "после перезагрузки ни одной команды — оставляю прежние"
+            );
+            return false;
+        }
+        tracing::info!(
+            source,
+            commands = registry.commands.len(),
+            errors = registry.errors.len(),
+            "команды перезагружены"
+        );
+        self.resolver =
+            CommandResolver::new(&registry, self.wake_matcher.clone(), &self.config.nlu);
+        if self.config.listen.hotwords_score > 0.0 {
+            self.pipeline
+                .set_hotwords(hotword_phrases(&registry, &self.config.wake.words));
+        }
+        self.registry = registry;
+        true
+    }
+
     fn forget_permissions(&mut self, source: &str) {
         match self.permissions.forget_all() {
             Ok(n) => {
@@ -701,6 +830,7 @@ impl Core {
             time: journal::now(),
             heard: approval.heard.text.clone(),
             command: command.to_owned(),
+            slots: approval.heard.slots.clone(),
             score: approval.heard.score,
             permission: approval.note,
             answered_by: approval.answered_by,
@@ -772,11 +902,16 @@ impl Core {
                 Effect::CloseAsk => self.close_dialog(),
                 Effect::StopAll => {
                     self.player.stop();
+                    // Скрипт — завершить (всё дерево процессов), ожидания — прервать.
+                    if let Some(cancel) = self.cancel.take() {
+                        cancel.cancel();
+                    }
+                    // Зажатые клавиши — отпустить сразу, не дожидаясь потока действия.
+                    jarvis_platform::release_all_keys();
                     self.generation += 1; // результат прерванного действия — в никуда
                     self.executing = None;
                     self.approval = None;
                     self.early.clear();
-                    // Отпускание клавиш и завершение скриптов — этап 4.
                 }
             }
         }
@@ -803,15 +938,41 @@ impl Core {
     }
 }
 
-/// Текст окна-вопроса: что именно произойдёт (раздел 2.1 ТЗ).
-fn permission_dialog(command: &Command, offer_always: bool) -> DialogSpec {
+/// Текст окна-вопроса: что именно произойдёт (раздел 2.1 ТЗ) — с уже
+/// подставленными значениями слотов.
+fn permission_dialog(command: &Command, offer_always: bool, slots: &SlotValues) -> DialogSpec {
     let phrase = command
         .phrases
         .first()
         .map_or(command.id.as_str(), String::as_str);
-    let details = match &command.action {
+    let action = command.action.with_slots(slots);
+    let details = match &action {
         ActionSpec::OpenUrl { url } => format!("Адрес: {url}"),
-        ActionSpec::Media { .. } | ActionSpec::Say { .. } => command.action.summary(),
+        ActionSpec::LaunchApp { path, args, .. } => {
+            format!(
+                "Программа: {path}\nАргументы: {}",
+                if args.is_empty() {
+                    "нет".into()
+                } else {
+                    args.join(" ")
+                }
+            )
+        }
+        ActionSpec::RunScript {
+            path,
+            args,
+            timeout_sec,
+        } => format!(
+            "Скрипт: {}\nАргументы: {}\nНе дольше {} с",
+            command.dir.join(path).display(),
+            if args.is_empty() {
+                "нет".into()
+            } else {
+                args.join(" ")
+            },
+            timeout_sec.unwrap_or(jarvis_core::commands::DEFAULT_SCRIPT_TIMEOUT_SEC)
+        ),
+        other => format!("Действие: {}", other.summary()),
     };
     let mut buttons = vec![DialogButton {
         id: BUTTON_YES,
@@ -863,9 +1024,30 @@ mod tests {
             description: "откроет YouTube в браузере".into(),
             reply: ReplyChoice::Reply(Reply::Done),
             always_ask,
+            slots: Default::default(),
             action,
             dir: PathBuf::from("commands/browser"),
         }
+    }
+
+    #[test]
+    fn dialog_shows_filled_slots_and_script_paths() {
+        let mut c = command(
+            false,
+            ActionSpec::RunScript {
+                path: "backup.ps1".into(),
+                args: vec!["--level={level}".into()],
+                timeout_sec: Some(60),
+            },
+        );
+        c.dir = PathBuf::from("C:\\jarvis\\commands\\my");
+        let slots: SlotValues = [("level".to_owned(), "40".to_owned())]
+            .into_iter()
+            .collect();
+        let spec = permission_dialog(&c, true, &slots);
+        assert!(spec.text.contains("backup.ps1"), "{}", spec.text);
+        assert!(spec.text.contains("--level=40"), "{}", spec.text);
+        assert!(spec.text.contains("60 с"), "{}", spec.text);
     }
 
     #[test]
@@ -878,6 +1060,7 @@ mod tests {
                 },
             ),
             true,
+            &SlotValues::new(),
         );
         assert!(
             spec.heading.contains("открой ютуб") && spec.heading.contains("YouTube"),
@@ -902,9 +1085,11 @@ mod tests {
                 ActionSpec::Media {
                     operation: MediaOp::Mute,
                     steps: None,
+                    level: None,
                 },
             ),
             false,
+            &SlotValues::new(),
         );
         assert!(!spec.buttons.iter().any(|b| b.id == BUTTON_ALWAYS));
         assert!(spec.text.contains("всегда спрашивает"));

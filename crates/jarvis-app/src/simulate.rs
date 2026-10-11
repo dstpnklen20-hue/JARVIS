@@ -53,14 +53,14 @@ pub fn run_command(
                 if let Some(id) =
                     early.on_partial(tr.utterance, &tr.text, &resolution, instant, at(t))
                 {
-                    decided = Some((t, Resolution::Command { id, score: 1.0 }, true));
+                    decided = Some((t, Resolution::command(id, 1.0), true));
                 }
             }
         }
         if decided.is_none()
             && let Some((_, id)) = early.poll(at(t))
         {
-            decided = Some((t, Resolution::Command { id, score: 1.0 }, true));
+            decided = Some((t, Resolution::command(id, 1.0), true));
         }
     });
 

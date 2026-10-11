@@ -1,7 +1,8 @@
 //! От распознанного текста к команде.
 //!
 //! - Слово активации в тексте убирается («джарвис открой ютуб» → «открой ютуб»).
-//! - Текст сопоставляется с фразами команд (`jarvis_nlu`).
+//! - Текст сопоставляется с фразами команд (`jarvis_nlu`), значения слотов
+//!   проверяются по описанию в манифесте.
 //! - [`EarlyDecider`] выполняет команду, не дожидаясь конца фразы, если
 //!   частичный текст уверенно совпал и перестал меняться.
 
@@ -10,13 +11,16 @@ use std::time::{Duration, Instant};
 use jarvis_audio::wake::{WakeMatcher, normalize_words};
 use jarvis_core::commands::Registry;
 use jarvis_core::config::Nlu;
-use jarvis_nlu::{CommandMatcher, MatchResult, Thresholds};
+use jarvis_core::slots::{SlotSpec, SlotValues};
+use jarvis_nlu::{CommandMatcher, CommandPhrases, MatchResult, SlotKind, Thresholds};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Resolution {
     Command {
         id: String,
         score: f32,
+        /// Значения слотов, проверенные по манифесту.
+        slots: SlotValues,
     },
     /// Два кандидата почти равны.
     Ambiguous {
@@ -30,10 +34,23 @@ pub enum Resolution {
     Empty,
 }
 
+impl Resolution {
+    /// Команда без слотов и с этим id и уверенностью.
+    pub fn command(id: impl Into<String>, score: f32) -> Self {
+        Resolution::Command {
+            id: id.into(),
+            score,
+            slots: SlotValues::new(),
+        }
+    }
+}
+
 pub struct CommandResolver {
     matcher: CommandMatcher,
     wake: WakeMatcher,
     ids: Vec<String>,
+    /// Описания слотов команд (по тем же индексам, что `ids`).
+    slot_specs: Vec<std::collections::BTreeMap<String, SlotSpec>>,
     /// 0 — решение по началу фразы выключено.
     prefix_min_ratio: f32,
 }
@@ -45,6 +62,7 @@ const EXACT_SCORE: f32 = 0.99;
 /// пакет команд не может подменить встроенную команду.
 pub const BUILTIN_STOP: &str = "builtin:stop";
 pub const BUILTIN_FORGET_PERMISSIONS: &str = "builtin:forget_permissions";
+pub const BUILTIN_RELOAD_COMMANDS: &str = "builtin:reload_commands";
 
 const BUILTINS: &[(&str, &[&str])] = &[
     (
@@ -59,39 +77,76 @@ const BUILTINS: &[(&str, &[&str])] = &[
             "забудь все разрешения",
         ],
     ),
+    (
+        BUILTIN_RELOAD_COMMANDS,
+        &[
+            "обнови команды",
+            "перезагрузи команды",
+            "обнови список команд",
+        ],
+    ),
 ];
 
 pub fn is_builtin(id: &str) -> bool {
     id.starts_with("builtin:")
 }
 
+fn slot_kind(spec: &SlotSpec) -> SlotKind {
+    match spec {
+        SlotSpec::Number { min, max } => SlotKind::Number {
+            min: *min,
+            max: *max,
+        },
+        SlotSpec::Choice { values } => {
+            SlotKind::Choice(values.spoken().into_iter().map(str::to_owned).collect())
+        }
+    }
+}
+
 impl CommandResolver {
     pub fn new(registry: &Registry, wake: WakeMatcher, nlu: &Nlu) -> Self {
-        let mut phrases: Vec<Vec<&str>> = BUILTINS.iter().map(|(_, p)| p.to_vec()).collect();
+        let mut entries: Vec<CommandPhrases> = BUILTINS
+            .iter()
+            .map(|(_, p)| CommandPhrases {
+                phrases: p.iter().map(|s| (*s).to_owned()).collect(),
+                slots: Vec::new(),
+            })
+            .collect();
         let mut ids: Vec<String> = BUILTINS.iter().map(|(id, _)| (*id).to_owned()).collect();
+        let mut slot_specs = vec![Default::default(); BUILTINS.len()];
         for command in &registry.commands {
-            phrases.push(command.phrases.iter().map(String::as_str).collect());
+            entries.push(CommandPhrases {
+                phrases: command.phrases.clone(),
+                slots: command
+                    .slots
+                    .iter()
+                    .map(|(name, spec)| (name.clone(), slot_kind(spec)))
+                    .collect(),
+            });
             ids.push(command.id.clone());
+            slot_specs.push(command.slots.clone());
         }
         let thresholds = Thresholds {
             min_score: nlu.min_score,
             ambiguity_margin: nlu.ambiguity_margin,
         };
         Self {
-            matcher: CommandMatcher::new(&phrases, thresholds),
+            matcher: CommandMatcher::with_slots(&entries, thresholds),
             wake,
             ids,
+            slot_specs,
             prefix_min_ratio: nlu.prefix_min_ratio,
         }
     }
 
     /// Команда, которую частичный текст определяет без ожидания: точная
     /// фраза или однозначное начало фразы (см. `CommandMatcher::unique_prefix`).
+    /// Команды со слотами — никогда: «сорок» ещё может стать «сорок пять».
     pub fn instant(&self, text: &str, resolution: &Resolution) -> Option<String> {
-        if let Resolution::Command { id, score } = resolution
+        if let Resolution::Command { id, score, slots } = resolution
             && *score >= EXACT_SCORE
         {
-            return Some(id.clone());
+            return slots.is_empty().then(|| id.clone());
         }
         if self.prefix_min_ratio <= 0.0 {
             return None;
@@ -118,9 +173,15 @@ impl CommandResolver {
         }
         let id = |i: usize| self.ids.get(i).cloned().unwrap_or_default();
         match self.matcher.find(&command) {
-            MatchResult::Matched(c) => Resolution::Command {
-                id: id(c.command),
-                score: c.score,
+            MatchResult::Matched(c) => match self.accept_slots(c.command, &c.slots) {
+                Some(slots) => Resolution::Command {
+                    id: id(c.command),
+                    score: c.score,
+                    slots,
+                },
+                None => Resolution::NotUnderstood {
+                    best: Some((id(c.command), c.score)),
+                },
             },
             MatchResult::Ambiguous(a, b) => Resolution::Ambiguous {
                 first: id(a.command),
@@ -131,6 +192,17 @@ impl CommandResolver {
             },
         }
     }
+
+    /// Проверка значений слотов по манифесту и замена на подстановку.
+    fn accept_slots(&self, command: usize, raw: &[(String, String)]) -> Option<SlotValues> {
+        let specs = self.slot_specs.get(command)?;
+        raw.iter()
+            .map(|(name, value)| {
+                let accepted = specs.get(name)?.accept(value)?;
+                Some((name.clone(), accepted))
+            })
+            .collect()
+    }
 }
 
 /// Фразы для подсказок распознавателю: фразы команд и слова активации.
@@ -140,10 +212,18 @@ pub fn hotword_phrases(registry: &Registry, wake_words: &[String]) -> Vec<String
     let builtin = BUILTINS
         .iter()
         .flat_map(|(_, p)| p.iter().map(|s| (*s).to_owned()));
+    // Фразы со слотами — без мест слотов; значения выбора — отдельными подсказками.
+    let choices = registry.commands.iter().flat_map(|c| {
+        c.slots.values().flat_map(|spec| match spec {
+            SlotSpec::Choice { values } => values.spoken().into_iter().map(str::to_owned).collect(),
+            SlotSpec::Number { .. } => Vec::new(),
+        })
+    });
     let mut phrases: Vec<String> = registry
         .commands
         .iter()
-        .flat_map(|c| c.phrases.iter().cloned())
+        .flat_map(|c| c.phrases.iter().map(|p| strip_placeholders(p)))
+        .chain(choices)
         .chain(wake_words.iter().cloned())
         .chain(builtin)
         .map(|p| normalize_words(&p).join(" "))
@@ -156,6 +236,21 @@ pub fn hotword_phrases(registry: &Registry, wake_words: &[String]) -> Vec<String
     phrases.sort();
     phrases.dedup();
     phrases
+}
+
+/// «громкость на {level}» → «громкость на ».
+fn strip_placeholders(phrase: &str) -> String {
+    let mut out = String::with_capacity(phrase.len());
+    let mut depth = 0;
+    for c in phrase.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Раннее решение по частичному тексту.
@@ -212,7 +307,9 @@ impl EarlyDecider {
 
     fn track(&mut self, utterance: u64, text: &str, resolution: &Resolution, now: Instant) {
         match resolution {
-            Resolution::Command { id, score } if *score >= self.min_score => {
+            Resolution::Command { id, score, slots }
+                if *score >= self.min_score && slots.is_empty() =>
+            {
                 let same = self
                     .candidate
                     .as_ref()
@@ -368,10 +465,7 @@ mod tests {
     }
 
     fn cmd(id: &str, score: f32) -> Resolution {
-        Resolution::Command {
-            id: id.into(),
-            score,
-        }
+        Resolution::command(id, score)
     }
 
     #[test]

@@ -1,0 +1,35 @@
+# Примеры для своих команд: скрипт со слотом и цепочка действий.
+# Можно удалить папку — остальные пакеты от неё не зависят.
+pack = "examples"
+version = 1
+
+[[command]]
+id = "example_note"
+phrases = ["запиши отметку {mood}", "отметь настроение {mood}"]
+description = "запишет отметку в файл examples\\notes.txt (пример скрипта)"
+reply = "ok"
+[command.slots.mood]
+type = "choice"
+values = { "отличное" = "great", "хорошее" = "good", "так себе" = "meh" }
+[command.action]
+type = "run_script"
+path = "note.ps1"
+args = ["{mood}"]
+timeout_sec = 10
+
+[[command]]
+id = "example_focus"
+phrases = ["режим работы", "рабочий режим"]
+description = "свернёт окна и откроет Блокнот (пример цепочки)"
+reply = "ok"
+[command.action]
+type = "sequence"
+[[command.action.steps]]
+type = "hotkey"
+keys = ["win", "d"]
+[[command.action.steps]]
+type = "wait"
+ms = 400
+[[command.action.steps]]
+type = "launch_app"
+path = "notepad.exe"

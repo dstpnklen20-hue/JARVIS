@@ -241,11 +241,26 @@ impl PermissionStore {
     }
 }
 
-/// Отпечаток действия команды: пакет, id и действие в каноническом виде.
+/// Отпечаток действия команды: пакет, id, действие и слоты в каноническом
+/// виде плюс содержимое файлов из папки пакета (скриптов, звуков). Подменили
+/// скрипт, не меняя манифест, — отпечаток другой, Джарвис спросит снова.
 pub fn fingerprint(command: &Command) -> String {
     let action = serde_json::to_string(&command.action).unwrap_or_default();
-    let digest = Sha256::digest(format!("{}\n{}\n{}", command.pack, command.id, action).as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    let slots = serde_json::to_string(&command.slots).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}\n{}\n{action}\n{slots}", command.pack, command.id).as_bytes());
+    for file in command.action.pack_files() {
+        hasher.update(b"\nfile:");
+        match std::fs::read(command.dir.join(file)) {
+            Ok(bytes) => hasher.update(Sha256::digest(&bytes)),
+            Err(_) => hasher.update(b"unreadable"),
+        }
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn now_text() -> String {
@@ -270,6 +285,7 @@ mod tests {
             description: "откроет сайт".into(),
             reply: ReplyChoice::Reply(Reply::Done),
             always_ask,
+            slots: Default::default(),
             action: ActionSpec::OpenUrl { url: url.into() },
             dir: PathBuf::from("commands/test"),
         }
@@ -446,6 +462,27 @@ mod tests {
             PermissionStore::load(&path),
             Err(PermissionError::Version { .. })
         ));
+    }
+
+    #[test]
+    fn swapped_script_content_changes_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("backup.ps1"), "Write-Host ok").unwrap();
+        let mut c = command("backup", "https://x.com", false);
+        c.dir = dir.path().to_path_buf();
+        c.action = ActionSpec::RunScript {
+            path: "backup.ps1".into(),
+            args: vec![],
+            timeout_sec: None,
+        };
+        let before = fingerprint(&c);
+        assert_eq!(before, fingerprint(&c));
+        std::fs::write(dir.path().join("backup.ps1"), "Remove-Item C:\\ -Recurse").unwrap();
+        assert_ne!(
+            before,
+            fingerprint(&c),
+            "подменённый скрипт — новый отпечаток"
+        );
     }
 
     #[test]

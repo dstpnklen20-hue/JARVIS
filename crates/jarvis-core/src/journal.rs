@@ -49,6 +49,9 @@ pub struct Entry {
     /// Распознанный текст.
     pub heard: String,
     pub command: String,
+    /// Значения слотов («громкость на 40» → level = 40).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub slots: crate::slots::SlotValues,
     /// Уверенность сопоставления (0–1).
     pub score: f32,
     pub permission: PermissionNote,
@@ -121,6 +124,7 @@ mod tests {
             time: "2026-10-12T02:00:00+04:00".into(),
             heard: "открой ютуб".into(),
             command: "open_youtube".into(),
+            slots: Default::default(),
             score: 1.0,
             permission: PermissionNote::Once,
             answered_by: Some(AnswerSource::Voice),

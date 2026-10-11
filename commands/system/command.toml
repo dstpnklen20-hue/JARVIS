@@ -1,0 +1,59 @@
+# Питание и окна. Выключение, перезагрузка и сон помечены always_ask:
+# Джарвис спрашивает каждый раз («всегда» не предлагается).
+pack = "system"
+version = 1
+
+[[command]]
+id = "system_lock"
+phrases = ["заблокируй компьютер", "заблокируй экран", "блокировка"]
+description = "заблокирует компьютер"
+reply = "none"
+[command.action]
+type = "system_power"
+operation = "lock"
+
+[[command]]
+id = "system_sleep"
+phrases = ["переведи компьютер в сон", "спящий режим", "усни"]
+description = "переведёт компьютер в спящий режим"
+always_ask = true
+reply = "none"
+[command.action]
+type = "system_power"
+operation = "sleep"
+
+[[command]]
+id = "system_restart"
+phrases = ["перезагрузи компьютер", "перезагрузка компьютера"]
+description = "перезагрузит компьютер — несохранённые данные пропадут"
+always_ask = true
+[command.action]
+type = "system_power"
+operation = "restart"
+
+[[command]]
+id = "system_shutdown"
+phrases = ["выключи компьютер", "выключение компьютера"]
+description = "выключит компьютер — несохранённые данные пропадут"
+always_ask = true
+[command.action]
+type = "system_power"
+operation = "shutdown"
+
+[[command]]
+id = "system_show_desktop"
+phrases = ["покажи рабочий стол", "сверни все окна"]
+description = "свернёт все окна (Win+D)"
+reply = "none"
+[command.action]
+type = "hotkey"
+keys = ["win", "d"]
+
+[[command]]
+id = "system_screenshot"
+phrases = ["сделай скриншот", "снимок экрана"]
+description = "откроет выделение области для снимка экрана (Win+Shift+S)"
+reply = "none"
+[command.action]
+type = "hotkey"
+keys = ["win", "shift", "s"]

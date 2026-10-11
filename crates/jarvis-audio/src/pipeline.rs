@@ -88,6 +88,7 @@ pub enum PipelineEvent {
 enum Control {
     Listen(bool),
     Transcribe(bool),
+    Hotwords(Vec<String>),
     Shutdown,
 }
 
@@ -150,6 +151,11 @@ impl Pipeline {
     /// его само; выключает ядро, когда команды больше не ждёт.
     pub fn set_transcribing(&self, on: bool) {
         let _ = self.control.send(Control::Transcribe(on));
+    }
+
+    /// Новые подсказки распознавателю команд (после перезагрузки команд).
+    pub fn set_hotwords(&self, phrases: Vec<String>) {
+        let _ = self.control.send(Control::Hotwords(phrases));
     }
 
     /// Остановить поток и дождаться его завершения.
@@ -319,6 +325,12 @@ impl Worker<'_> {
                         self.stt.reset();
                     }
                     self.transcribing = on;
+                    continue;
+                }
+                Some(Control::Hotwords(phrases)) => {
+                    if self.settings.hotwords.is_some() {
+                        self.stt.set_hotwords(&phrases);
+                    }
                     continue;
                 }
                 None => {}

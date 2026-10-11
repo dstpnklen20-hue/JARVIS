@@ -1,0 +1,32 @@
+# Программы. Голое имя ищется в PATH (системные программы Windows там есть);
+# для своих программ укажите полный путь, например
+#   path = "C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+pack = "apps"
+version = 1
+
+[[command]]
+id = "app_notepad"
+phrases = ["открой блокнот", "запусти блокнот"]
+description = "запустит Блокнот"
+reply = "ok"
+[command.action]
+type = "launch_app"
+path = "notepad.exe"
+
+[[command]]
+id = "app_calculator"
+phrases = ["открой калькулятор", "запусти калькулятор"]
+description = "запустит Калькулятор"
+reply = "ok"
+[command.action]
+type = "launch_app"
+path = "calc.exe"
+
+[[command]]
+id = "app_explorer"
+phrases = ["открой проводник", "покажи файлы"]
+description = "откроет Проводник"
+reply = "ok"
+[command.action]
+type = "launch_app"
+path = "explorer.exe"

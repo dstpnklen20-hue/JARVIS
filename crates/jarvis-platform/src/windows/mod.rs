@@ -5,6 +5,9 @@ mod dialog;
 mod event_loop;
 mod hotkey;
 mod instance;
+mod keys;
+mod power;
+mod process;
 mod stop;
 mod system;
 
@@ -16,6 +19,9 @@ pub use event_loop::{
 };
 pub use hotkey::{HotkeyGuard, parse_hotkey, register_hotkey};
 pub use instance::acquire_single_instance;
+pub use keys::{press_keys, release_all_keys};
+pub use power::{Power, power, set_volume};
+pub use process::{RunEnd, run_and_wait, spawn_detached};
 pub use stop::{StopSignal, create_stop_signal, send_stop_signal};
 pub use system::{is_elevated, os_info};
 

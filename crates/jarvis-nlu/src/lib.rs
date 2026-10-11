@@ -8,5 +8,5 @@ pub mod matcher;
 pub mod normalize;
 pub mod numbers;
 
-pub use matcher::{CommandMatcher, MatchResult, Thresholds};
+pub use matcher::{CommandMatcher, CommandPhrases, MatchResult, SlotKind, Thresholds};
 pub use normalize::normalize;

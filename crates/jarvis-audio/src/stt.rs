@@ -50,6 +50,8 @@ pub struct SherpaStt {
     last_text: String,
     stream_samples: u64,
     quiet_samples: u64,
+    /// Подсказки для новых потоков (после «обнови команды»); `None` — заданные при создании.
+    hotwords: Option<String>,
 }
 
 impl SherpaStt {
@@ -73,6 +75,7 @@ impl SherpaStt {
             last_text: String::new(),
             stream_samples: 0,
             quiet_samples: 0,
+            hotwords: None,
         };
         // Прогрев: первый прогон медленнее остальных.
         stt.accept(&vec![0.0; MODEL_RATE as usize]);
@@ -80,9 +83,19 @@ impl SherpaStt {
         stt
     }
 
+    /// Новые подсказки (фразы команд после перезагрузки). Работают, только
+    /// если распознаватель создан с подсказками (поиск по нескольким гипотезам).
+    pub fn set_hotwords(&mut self, phrases: &[String]) {
+        self.hotwords = Some(phrases.join("\n"));
+        self.new_stream();
+    }
+
     fn new_stream(&mut self) {
         // Не recognizer.reset(): он не сбрасывает энкодер (см. wake.rs).
-        self.stream = self.recognizer.create_stream();
+        self.stream = match &self.hotwords {
+            Some(h) => self.recognizer.create_stream_with_hotwords(h),
+            None => self.recognizer.create_stream(),
+        };
         self.last_text.clear();
         self.stream_samples = 0;
     }

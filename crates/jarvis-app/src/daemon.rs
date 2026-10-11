@@ -109,6 +109,8 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
 
     let (core_tx, core_rx) = mpsc::channel::<CoreMsg>();
     let (ui_tx, ui_rx) = mpsc::channel::<Indicator>();
+    let commands_dir = resolve(root, &config.paths.commands);
+    let wake_matcher = hearing.matcher.clone();
     let params = CoreParams {
         settings: PipelineSettings {
             device: config.audio.input_device_name().map(str::to_owned),
@@ -124,6 +126,8 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
         permissions,
         journal,
         config,
+        commands_dir,
+        wake_matcher,
         ui: ui_tx,
         waker,
     };
@@ -154,6 +158,9 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
             }
             Some(MenuAction::ForgetPermissions) => {
                 let _ = core_tx.send(CoreMsg::ForgetPermissions);
+            }
+            Some(MenuAction::ReloadCommands) => {
+                let _ = core_tx.send(CoreMsg::ReloadCommands);
             }
             Some(MenuAction::Quit) => return ControlFlow::Break(()),
             None => {}

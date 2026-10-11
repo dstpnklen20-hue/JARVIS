@@ -28,9 +28,12 @@ pub use windows::{HotkeyGuard, parse_hotkey, register_hotkey};
 #[cfg(windows)]
 pub use windows::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 
-/// Системные действия команд: открыть адрес, мультимедиа-клавиши.
+/// Системные действия команд: адреса, мультимедиа, процессы, клавиши, питание, громкость.
 #[cfg(windows)]
-pub use windows::{MediaKey, media_key, open_url};
+pub use windows::{
+    MediaKey, Power, RunEnd, media_key, open_url, power, press_keys, release_all_keys,
+    run_and_wait, set_volume, spawn_detached,
+};
 
 /// Мягкая остановка работающей копии извне (`jarvis --stop`).
 #[cfg(windows)]

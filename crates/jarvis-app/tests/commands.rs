@@ -195,6 +195,40 @@ fn spoken_permission_answers_are_understood() {
 
 #[test]
 #[ignore = "нужны модели: scripts/download-models.ps1"]
+fn slot_values_are_extracted_from_speech() {
+    let mut s = setup();
+    for (file, id, slot, value) in [
+        (
+            "media_volume_set__pavel.wav",
+            "media_volume_set",
+            "level",
+            "40",
+        ),
+        (
+            "media_volume_set__irina_words.wav",
+            "media_volume_set",
+            "level",
+            "25",
+        ),
+        ("example_note__pavel.wav", "example_note", "mood", "good"),
+    ] {
+        let resolution = decide(&mut s, &root().join("tests/fixtures/commands").join(file));
+        match resolution {
+            Resolution::Command { id: got, slots, .. } => {
+                assert_eq!(got, id, "{file}");
+                assert_eq!(
+                    slots.get(slot).map(String::as_str),
+                    Some(value),
+                    "{file}: {slots:?}"
+                );
+            }
+            other => panic!("{file}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "нужны модели: scripts/download-models.ps1"]
 fn bare_wake_word_is_not_a_command() {
     let mut s = setup();
     let resolution = decide(&mut s, &root().join("tests/fixtures/wake/pavel_jarvis.wav"));
