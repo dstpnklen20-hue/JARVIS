@@ -319,6 +319,8 @@ impl Core {
     }
 
     fn on_tick(&mut self) {
+        // Сменилось устройство вывода — переоткрыть, не дожидаясь ответа.
+        self.player.maintain();
         let now = Instant::now();
         if self.state.accepts_commands()
             && let Some((utterance, id)) = self.early.poll(now)

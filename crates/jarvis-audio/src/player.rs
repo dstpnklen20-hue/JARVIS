@@ -4,10 +4,15 @@
 //! буфера устройства, без задержки на открытие. Клипы при загрузке
 //! переводятся в частоту устройства, а callback только копирует отсчёты —
 //! без блокировок и аллокаций (команды приходят через lock-free очередь).
+//!
+//! Если поток сломался (сменилось устройство вывода по умолчанию, наушники
+//! отключили — WASAPI в этом случае поток не переключает, а останавливает),
+//! [`Player::maintain`] открывает вывод заново на текущем устройстве.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 use cpal::{FromSample, SampleFormat, SizedSample};
@@ -25,89 +30,120 @@ enum Command {
 }
 
 pub struct Player {
-    _stream: cpal::Stream,
-    commands: HeapProd<Command>,
-    clips: HashMap<Reply, Vec<Arc<[f32]>>>,
+    output: Output,
+    /// Клипы пакета в исходной частоте — для пересчёта, если новое
+    /// устройство вывода работает на другой частоте.
+    sources: HashMap<Reply, Vec<crate::wav::Clip>>,
+    clips: ReplyClips,
     last: HashMap<Reply, usize>,
     rng: u64,
-    device_rate: u32,
     gain: f32,
     /// Последние произвольные клипы. Поток вывода отпускает клип, когда
     /// он доиграл или его сменил следующий; пока клип есть и здесь, его
     /// память не освобождается в потоке реального времени.
     adhoc: VecDeque<Arc<[f32]>>,
+    /// Последняя попытка переоткрыть сломанный вывод.
+    last_reopen: Option<Instant>,
 }
+
+/// Открытый поток вывода.
+struct Output {
+    _stream: cpal::Stream,
+    commands: HeapProd<Command>,
+    device_rate: u32,
+    /// Поток сломался — нужно открыть заново (ставит callback ошибок).
+    broken: Arc<AtomicBool>,
+}
+
+/// Варианты каждого ответа, готовые для устройства вывода.
+type ReplyClips = HashMap<Reply, Vec<Arc<[f32]>>>;
 
 /// Сколько последних произвольных клипов держать (хватило бы двух).
 const ADHOC_KEEP: usize = 4;
+/// Не чаще — попытки переоткрыть вывод, пока устройства нет.
+const REOPEN_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Player {
     /// Открывает устройство вывода по умолчанию и готовит клипы пакета.
     pub fn new(pack: &VoicePack, volume: f32) -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or(AudioError::NoDefaultOutput)?;
-        let supported = device.default_output_config().map_err(device_err)?;
-        let config = supported.config();
-        let device_rate = config.sample_rate;
-        let channels = usize::from(config.channels).max(1);
-
-        let mut clips = HashMap::new();
-        for reply in Reply::ALL {
-            let variants = pack
-                .variants(reply)
-                .iter()
-                .map(|clip| {
-                    clip.trimmed()
-                        .resampled(device_rate)
-                        .map(|c| Arc::<[f32]>::from(c.samples))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if !variants.is_empty() {
-                clips.insert(reply, variants);
-            }
-        }
-
-        let (producer, consumer) = HeapRb::<Command>::new(16).split();
-        let stream = match supported.sample_format() {
-            SampleFormat::F32 => build::<f32>(&device, &config, channels, consumer),
-            SampleFormat::I16 => build::<i16>(&device, &config, channels, consumer),
-            SampleFormat::I32 => build::<i32>(&device, &config, channels, consumer),
-            SampleFormat::U16 => build::<u16>(&device, &config, channels, consumer),
-            other => return Err(AudioError::UnsupportedFormat(other.to_string())),
-        }?;
-        stream.play().map_err(device_err)?;
-        tracing::info!(
-            device = %device,
-            rate = device_rate,
-            channels,
-            pack = %pack.name,
-            "вывод звука готов"
-        );
-
+        let sources: HashMap<_, _> = Reply::ALL
+            .into_iter()
+            .map(|reply| {
+                (
+                    reply,
+                    pack.variants(reply)
+                        .iter()
+                        .map(|c| c.trimmed())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        let output = Output::open()?;
+        let clips = resample_all(&sources, output.device_rate)?;
+        tracing::info!(pack = %pack.name, "звуковой пакет готов");
         Ok(Self {
-            _stream: stream,
-            commands: producer,
+            output,
+            sources,
             clips,
             last: HashMap::new(),
             rng: seed(),
-            device_rate,
             gain: volume,
             adhoc: VecDeque::new(),
+            last_reopen: None,
         })
+    }
+
+    /// Если поток вывода сломался — открыть заново на текущем устройстве по
+    /// умолчанию (не чаще раза в секунду). Ядро вызывает это каждый такт;
+    /// пока всё в порядке, это одна атомарная проверка.
+    pub fn maintain(&mut self) {
+        if !self.output.broken.load(Ordering::Relaxed) {
+            return;
+        }
+        if self
+            .last_reopen
+            .is_some_and(|t| t.elapsed() < REOPEN_INTERVAL)
+        {
+            return;
+        }
+        self.last_reopen = Some(Instant::now());
+        let reopened = Output::open().and_then(|output| {
+            let clips = if output.device_rate == self.output.device_rate {
+                None
+            } else {
+                Some(resample_all(&self.sources, output.device_rate)?)
+            };
+            Ok((output, clips))
+        });
+        match reopened {
+            Ok((output, clips)) => {
+                self.output = output;
+                if let Some(clips) = clips {
+                    self.clips = clips;
+                }
+                self.adhoc.clear();
+                self.last_reopen = None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %jarvis_core::error_chain(&e), "вывод звука пока не открывается, пробую снова");
+            }
+        }
     }
 
     /// Проигрывает один из вариантов ответа (прерывая текущий звук).
     /// Возвращает длительность или `None`, если в пакете нет такого ответа.
     pub fn play(&mut self, reply: Reply) -> Option<Duration> {
+        self.maintain();
         let variants = self.clips.get(&reply)?;
         self.rng = xorshift(self.rng);
         let index = pick(variants.len(), self.last.get(&reply).copied(), self.rng);
         self.last.insert(reply, index);
         let samples = Arc::clone(&variants[index]);
-        let duration = Duration::from_secs_f64(samples.len() as f64 / f64::from(self.device_rate));
+        let duration =
+            Duration::from_secs_f64(samples.len() as f64 / f64::from(self.output.device_rate));
         if self
+            .output
             .commands
             .try_push(Command::Play {
                 samples,
@@ -124,13 +160,20 @@ impl Player {
     /// Проигрывает произвольный клип (действие `say` со своим файлом).
     /// Ресемплинг — здесь, не в потоке вывода.
     pub fn play_clip(&mut self, clip: &crate::wav::Clip) -> Result<Duration, AudioError> {
-        let samples: Arc<[f32]> = clip.trimmed().resampled(self.device_rate)?.samples.into();
-        let duration = Duration::from_secs_f64(samples.len() as f64 / f64::from(self.device_rate));
+        self.maintain();
+        let samples: Arc<[f32]> = clip
+            .trimmed()
+            .resampled(self.output.device_rate)?
+            .samples
+            .into();
+        let duration =
+            Duration::from_secs_f64(samples.len() as f64 / f64::from(self.output.device_rate));
         self.adhoc.push_back(Arc::clone(&samples));
         if self.adhoc.len() > ADHOC_KEEP {
             self.adhoc.pop_front();
         }
-        self.commands
+        self.output
+            .commands
             .try_push(Command::Play {
                 samples,
                 gain: self.gain,
@@ -141,8 +184,63 @@ impl Player {
 
     /// Немедленно замолчать.
     pub fn stop(&mut self) {
-        let _ = self.commands.try_push(Command::Stop);
+        let _ = self.output.commands.try_push(Command::Stop);
     }
+}
+
+impl Output {
+    /// Открывает устройство вывода по умолчанию.
+    fn open() -> Result<Self, AudioError> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or(AudioError::NoDefaultOutput)?;
+        let supported = device.default_output_config().map_err(device_err)?;
+        let config = supported.config();
+        let channels = usize::from(config.channels).max(1);
+        let broken = Arc::new(AtomicBool::new(false));
+        let (producer, consumer) = HeapRb::<Command>::new(16).split();
+        let flag = Arc::clone(&broken);
+        let stream = match supported.sample_format() {
+            SampleFormat::F32 => build::<f32>(&device, &config, channels, consumer, flag),
+            SampleFormat::I16 => build::<i16>(&device, &config, channels, consumer, flag),
+            SampleFormat::I32 => build::<i32>(&device, &config, channels, consumer, flag),
+            SampleFormat::U16 => build::<u16>(&device, &config, channels, consumer, flag),
+            other => return Err(AudioError::UnsupportedFormat(other.to_string())),
+        }?;
+        stream.play().map_err(device_err)?;
+        tracing::info!(device = %device, rate = config.sample_rate, channels, "вывод звука открыт");
+        Ok(Self {
+            _stream: stream,
+            commands: producer,
+            device_rate: config.sample_rate,
+            broken,
+        })
+    }
+}
+
+/// Клипы пакета в частоте устройства.
+fn resample_all(
+    sources: &HashMap<Reply, Vec<crate::wav::Clip>>,
+    rate: u32,
+) -> Result<ReplyClips, AudioError> {
+    sources
+        .iter()
+        .map(|(reply, clips)| {
+            let resampled = clips
+                .iter()
+                .map(|c| c.resampled(rate).map(|c| Arc::<[f32]>::from(c.samples)))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((*reply, resampled))
+        })
+        .collect()
+}
+
+/// Ошибка потока вывода, после которой поток надо открыть заново.
+/// Xrun и отказ в приоритете реального времени — поток продолжает работать;
+/// DeviceChanged — поток сам переключился на новое устройство.
+fn needs_reopen(kind: cpal::ErrorKind) -> bool {
+    crate::capture::is_fatal(kind)
 }
 
 /// Индекс варианта: случайный, но не тот же, что в прошлый раз.
@@ -176,6 +274,7 @@ fn build<T>(
     config: &cpal::StreamConfig,
     channels: usize,
     mut commands: HeapCons<Command>,
+    broken: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
@@ -209,9 +308,12 @@ where
                     current = None;
                 }
             },
-            |err: cpal::Error| {
-                if crate::capture::is_fatal(err.kind()) {
-                    tracing::error!(error = %err, "ошибка потока вывода звука");
+            move |err: cpal::Error| {
+                if needs_reopen(err.kind()) {
+                    // Повторные ошибки того же потока не засоряют лог.
+                    if !broken.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(error = %err, "поток вывода звука сломался — переоткрою");
+                    }
                 } else {
                     tracing::debug!(error = %err, "сбой потока вывода звука");
                 }
@@ -224,6 +326,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Сломанный поток (как после смены устройства по умолчанию) открывается
+    /// заново, и ответы снова играют.
+    #[test]
+    #[ignore = "нужно устройство вывода звука"]
+    fn broken_output_is_reopened() {
+        let pack_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sounds/default");
+        let pack = VoicePack::load(&pack_dir).unwrap();
+        let mut player = Player::new(&pack, 0.0).unwrap();
+        let old = Arc::clone(&player.output.broken);
+
+        player.output.broken.store(true, Ordering::Relaxed);
+        player.maintain();
+        assert!(
+            !player.output.broken.load(Ordering::Relaxed),
+            "вывод открыт заново"
+        );
+        assert!(!Arc::ptr_eq(&old, &player.output.broken), "это новый поток");
+        assert!(player.play(Reply::Wake).is_some());
+
+        // Пока устройство не открывается, попытки — не чаще раза в секунду.
+        player.output.broken.store(true, Ordering::Relaxed);
+        player.last_reopen = Some(Instant::now());
+        player.maintain();
+        assert!(
+            player.output.broken.load(Ordering::Relaxed),
+            "рано для новой попытки"
+        );
+    }
 
     #[test]
     fn pick_never_repeats_last_variant() {
