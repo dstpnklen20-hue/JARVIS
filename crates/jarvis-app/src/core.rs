@@ -209,6 +209,8 @@ pub struct Core {
     asking_aloud_until: Option<Instant>,
     /// Ответ «не понял» заменён уточняющим вопросом.
     clarifying: bool,
+    /// Сколько Джарвис проговорил с прошлого `apply` (см. `flush_spoke`).
+    spoke_pending: Duration,
     warn_elevated: bool,
 }
 
@@ -283,6 +285,7 @@ impl Core {
             speaking: None,
             asking_aloud_until: None,
             clarifying: false,
+            spoke_pending: Duration::ZERO,
             warn_elevated: p.elevated,
         })
     }
@@ -399,7 +402,10 @@ impl Core {
     }
 
     fn on_wake(&mut self, wake: WakeEvent) {
-        let answering = matches!(self.state, State::Idle | State::FollowUp { .. });
+        let answering = matches!(
+            self.state,
+            State::Idle | State::Listening { .. } | State::FollowUp { .. }
+        );
         self.apply(Event::WakeWord);
         if answering {
             // Пока человек договаривает команду, голос успеет загрузиться —
@@ -452,6 +458,9 @@ impl Core {
         }
         if !t.is_final {
             tracing::trace!(text = %t.text, ?resolution, "частичный текст");
+            if !t.text.trim().is_empty() {
+                self.apply(Event::UserSpeaking);
+            }
             let instant = self.resolver.instant(&t.text, &resolution);
             let score = match &resolution {
                 Resolution::Command { score, .. } => *score,
@@ -936,7 +945,28 @@ impl Core {
             return;
         }
         if let Some(duration) = self.player.play(reply) {
-            self.gate.mute_for(duration + ECHO_TAIL);
+            self.muted_for(duration);
+        }
+    }
+
+    /// Джарвис говорит `duration`: микрофон заглушён, и это время не должно
+    /// съедать ожидание команды или ответа (учитывается в конце `apply`).
+    fn muted_for(&mut self, duration: Duration) {
+        self.gate.mute_for(duration + ECHO_TAIL);
+        self.spoke_pending += duration + ECHO_TAIL;
+    }
+
+    /// Продлить ожидание на время своих фраз, накопленное с прошлого раза.
+    fn flush_spoke(&mut self) {
+        let spoke = std::mem::take(&mut self.spoke_pending);
+        if !spoke.is_zero() {
+            self.state = transition(
+                self.state,
+                Event::Spoke(spoke),
+                Instant::now(),
+                self.timings,
+            )
+            .next;
         }
     }
 
@@ -957,7 +987,7 @@ impl Core {
             }
         };
         if let Some(d) = duration {
-            self.gate.mute_for(d + ECHO_TAIL);
+            self.muted_for(d);
         }
     }
 
@@ -1061,6 +1091,8 @@ impl Core {
     }
 
     fn apply(&mut self, event: Event) {
+        // Звуки вне `apply` (шаг цепочки, «команды обновлены») — учесть до таймеров.
+        self.flush_spoke();
         let before = self.state;
         let tr = transition(self.state, event.clone(), Instant::now(), self.timings);
         self.state = tr.next;
@@ -1109,6 +1141,8 @@ impl Core {
                 }
             }
         }
+        // Ответ, прозвучавший в этом переходе («Да, сэр»), не съедает ожидание.
+        self.flush_spoke();
         if std::mem::discriminant(&before) != std::mem::discriminant(&self.state) {
             tracing::debug!(from = ?before, to = ?self.state, ?event, "переход");
             self.refresh_ui();

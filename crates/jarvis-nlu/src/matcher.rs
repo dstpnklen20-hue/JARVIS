@@ -85,6 +85,8 @@ struct Phrase {
     sorted: String,
     /// Слоты фразы по порядку меток (`zslotz0`, `zslotz1`…).
     slots: Vec<(String, SlotKind)>,
+    /// Первое слово фразы — обычно действие («открой», «выключи»); см. [`LEAD_MIN_SIMILARITY`].
+    lead: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +134,7 @@ impl CommandMatcher {
                     phrases.push(Phrase {
                         command,
                         sorted: sorted_words(&text),
+                        lead: lead_word(&text),
                         text,
                         slots,
                     });
@@ -169,6 +172,13 @@ impl CommandMatcher {
                     Some(found) => found,
                     None => continue, // в речи нет подходящего значения слота
                 }
+            };
+            // Действие в речи должно совпасть со словом фразы почти точно:
+            // «закрой ютуб» не должно стать «открой ютуб» (сходство фраз 0.82).
+            let score = if lead_heard(phrase, &query_words) {
+                score
+            } else {
+                score * LEAD_MISMATCH_PENALTY
             };
             match best_per_command
                 .iter_mut()
@@ -331,6 +341,28 @@ fn slot_windows(words: &[String], kind: &SlotKind) -> Vec<(usize, usize, String)
     out
 }
 
+/// Насколько слово в речи должно быть похоже на первое слово фразы (действие).
+/// «открою» → «открой» (0.83) проходит, «закрой» → «открой» (0.67) — нет.
+const LEAD_MIN_SIMILARITY: f32 = 0.7;
+/// Во сколько раз снижается сходство, если действия в речи нет.
+const LEAD_MISMATCH_PENALTY: f32 = 0.8;
+
+/// Первое слово фразы, если это не место для слота и не слишком короткое
+/// (в коротких словах одна ошибка распознавания — уже большая доля).
+fn lead_word(text: &str) -> Option<String> {
+    let first = text.split(' ').next()?;
+    (first.chars().count() >= 4 && !first.starts_with("zslotz")).then(|| first.to_owned())
+}
+
+/// Есть ли в речи действие фразы (на любом месте: порядок слов свободный).
+fn lead_heard(phrase: &Phrase, query: &[String]) -> bool {
+    phrase.lead.as_ref().is_none_or(|lead| {
+        query
+            .iter()
+            .any(|w| similarity(w, lead) >= LEAD_MIN_SIMILARITY)
+    })
+}
+
 /// Насколько слово в речи должно быть похоже на значение выбора.
 const CHOICE_MIN_SIMILARITY: f32 = 0.75;
 
@@ -398,6 +430,20 @@ mod tests {
         assert_eq!(matched("включи музыку"), 2);
         assert_eq!(matched("выключи звук"), 4);
         assert_eq!(matched("открой гугл"), 1);
+    }
+
+    #[test]
+    fn opposite_action_does_not_match() {
+        // Одна буква меняет смысл: «закрой» — не «открой».
+        for text in ["закрой ютуб", "закрой гугл"] {
+            assert!(
+                matches!(matcher().find(text), MatchResult::NoMatch(_)),
+                "«{text}»: {:?}",
+                matcher().find(text)
+            );
+        }
+        // Ошибка распознавания в окончании действия — не помеха.
+        assert_eq!(matched("открою ютуб"), 0);
     }
 
     #[test]

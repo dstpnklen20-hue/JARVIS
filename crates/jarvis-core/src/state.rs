@@ -64,8 +64,10 @@ pub enum Event {
     },
     /// Периодический такт: проверка таймаутов.
     Tick,
-    /// Джарвис начал говорить синтезированную фразу такой длительности.
+    /// Джарвис начал говорить фразу такой длительности (микрофон заглушён).
     Spoke(std::time::Duration),
+    /// В речи появились слова (частичный текст) — человек говорит.
+    UserSpeaking,
     /// Пункт «Пауза» в трее (переключатель).
     TogglePause,
     Pause,
@@ -150,6 +152,11 @@ impl Transition {
     }
 }
 
+/// Пока в речи появляются слова, ожидание команды не кончается раньше, чем
+/// через столько после последнего слова: фраза успеет закончиться (конец
+/// фразы — 0.8 с тишины) и не оборвётся по таймеру.
+pub const SPEAKING_GRACE: Duration = Duration::from_millis(2500);
+
 /// Настройки, влияющие на переходы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timings {
@@ -214,6 +221,14 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         }
         (S::FollowUp { until }, E::Spoke(d)) => Transition::stay(S::FollowUp { until: until + d }),
         (_, E::Spoke(_)) => Transition::stay(state),
+        // Человек ещё говорит — не обрывать фразу на середине по таймеру.
+        (S::Listening { until }, E::UserSpeaking) => Transition::stay(S::Listening {
+            until: until.max(now + SPEAKING_GRACE),
+        }),
+        (S::FollowUp { until }, E::UserSpeaking) => Transition::stay(S::FollowUp {
+            until: until.max(now + SPEAKING_GRACE),
+        }),
+        (_, E::UserSpeaking) => Transition::stay(state),
 
         // --- вопрос-разрешение ---
         (S::Listening { .. } | S::FollowUp { .. }, E::NeedPermission(id)) => Transition::to(
@@ -246,9 +261,11 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         (S::Idle | S::FollowUp { .. }, E::WakeWord) => {
             Transition::to(listening(), vec![Effect::PlayReply(Reply::Wake)])
         }
-        // Повторное «Джарвис» во время ожидания команды: продлеваем без
-        // повторного ответа, чтобы не перебивать пользователя.
-        (S::Listening { .. }, E::WakeWord) => Transition::stay(listening()),
+        // Повторное «Джарвис» во время ожидания команды: ответить снова и
+        // ждать команду заново — человек проверяет, слышат ли его.
+        (S::Listening { .. }, E::WakeWord) => {
+            Transition::to(listening(), vec![Effect::PlayReply(Reply::Wake)])
+        }
         (S::Executing, E::WakeWord) => Transition::stay(S::Executing),
 
         // --- команды ---
@@ -497,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn listening_wake_extends_without_answer() {
+    fn repeated_wake_answers_again_and_restarts_waiting() {
         let t0 = now();
         let later = t0 + Duration::from_secs(2);
         let tr = transition(State::Listening { until: t0 }, Event::WakeWord, later, T);
@@ -507,7 +524,38 @@ mod tests {
                 until: later + T.listen
             }
         );
+        assert_eq!(tr.effects, [Effect::PlayReply(Reply::Wake)]);
+    }
+
+    #[test]
+    fn speaking_keeps_waiting_open_until_phrase_ends() {
+        let t0 = now();
+        // Ожидание почти кончилось, а человек ещё говорит.
+        let listening = State::Listening {
+            until: t0 + Duration::from_millis(300),
+        };
+        let tr = transition(listening, Event::UserSpeaking, t0, T);
+        assert_eq!(
+            tr.next,
+            State::Listening {
+                until: t0 + SPEAKING_GRACE
+            }
+        );
         assert!(tr.effects.is_empty());
+        // Запас больше оставшегося времени — ничего не укорачивается.
+        let long = State::Listening {
+            until: t0 + Duration::from_secs(5),
+        };
+        assert_eq!(
+            transition(long, Event::UserSpeaking, t0, T),
+            Transition::stay(long)
+        );
+        for state in [State::Idle, State::Executing, State::Paused] {
+            assert_eq!(
+                transition(state, Event::UserSpeaking, t0, T),
+                Transition::stay(state)
+            );
+        }
     }
 
     #[test]
