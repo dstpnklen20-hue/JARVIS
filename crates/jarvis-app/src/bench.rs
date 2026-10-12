@@ -137,6 +137,7 @@ pub fn run(root: &Path, config: &Config, files: &[PathBuf]) -> anyhow::Result<()
     if explicit_files_empty {
         let resolver = CommandResolver::new(&registry, hearing.matcher.clone(), &config.nlu);
         bench_commands(root, config, &resolver, stt)?;
+        bench_tts(root, config)?;
     }
     Ok(())
 }
@@ -231,6 +232,51 @@ fn bench_commands(
             delays.len()
         );
     }
+    Ok(())
+}
+
+/// Замер синтеза речи на типичных фразах Джарвиса.
+pub fn bench_tts(root: &Path, config: &Config) -> anyhow::Result<()> {
+    use jarvis_audio::tts::{PiperTts, TextToSpeech as _};
+    const PHRASES: &[&str] = &[
+        "Сэр, команда «открой ютуб» откроет YouTube в браузере. Разрешить?",
+        "Сэр, вы имели в виду «открой гугл» или «открой яндекс»?",
+        "Сэр, команда «громкость на 40» установит громкость. Разрешить?",
+        "Сэр, я запущен с правами администратора. Команды тоже получат эти права.",
+    ];
+    println!();
+    let Some(name) = config.voice.tts_voice() else {
+        println!("Синтез речи выключен (voice.tts = \"none\").");
+        return Ok(());
+    };
+    let model = jarvis_audio::models::tts_voice(root, config, name)?;
+    let started = Instant::now();
+    let tts = PiperTts::new(&model, config.voice.tts_speed)?;
+    println!(
+        "Синтез речи, голос {name}: загрузка и прогрев {} мс",
+        started.elapsed().as_millis()
+    );
+    println!("{:>8} {:>8} {:>7}  фраза", "синтез", "речь", "RTF");
+    let (mut total_synth, mut total_audio) = (0.0f32, 0.0f32);
+    for phrase in PHRASES {
+        let started = Instant::now();
+        let clip = tts.synthesize(phrase)?;
+        let synth = started.elapsed().as_secs_f32();
+        let secs = clip.duration_secs();
+        total_synth += synth;
+        total_audio += secs;
+        println!(
+            "{:>6.0}мс {:>7.1}с {:>7.3}  {phrase}",
+            synth * 1000.0,
+            secs,
+            synth / secs.max(0.01)
+        );
+    }
+    println!(
+        "В среднем RTF {:.3}: секунда речи синтезируется за {:.0} мс",
+        total_synth / total_audio.max(0.01),
+        total_synth / total_audio.max(0.01) * 1000.0
+    );
     Ok(())
 }
 

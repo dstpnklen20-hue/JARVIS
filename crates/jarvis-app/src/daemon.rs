@@ -30,7 +30,7 @@ use jarvis_core::permissions::{PERMISSIONS_FILE, PermissionStore};
 use jarvis_core::root::project_path;
 use jarvis_platform::LoopEvent;
 
-use crate::core::{Core, CoreMsg, CoreParams};
+use crate::core::{Core, CoreMsg, CoreParams, VoiceSetup};
 use crate::hearing;
 use crate::tray::{Indicator, MenuAction, Tray};
 
@@ -111,6 +111,8 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
     let (ui_tx, ui_rx) = mpsc::channel::<Indicator>();
     let commands_dir = resolve(root, &config.paths.commands);
     let wake_matcher = hearing.matcher.clone();
+    let voice = voice_setup(root, &config);
+    let elevated = jarvis_platform::is_elevated().unwrap_or(false);
     let params = CoreParams {
         settings: PipelineSettings {
             device: config.audio.input_device_name().map(str::to_owned),
@@ -128,6 +130,8 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
         config,
         commands_dir,
         wake_matcher,
+        voice,
+        elevated,
         ui: ui_tx,
         waker,
     };
@@ -177,6 +181,27 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
     tracing::info!("Джарвис остановлен");
     jarvis_platform::notify_shutdown_complete();
     Ok(())
+}
+
+/// Голос синтеза из настроек. Без него Джарвис работает — динамические
+/// ответы заменяются фразами звукового пакета.
+fn voice_setup(root: &Path, config: &Config) -> Option<VoiceSetup> {
+    let name = config.voice.tts_voice()?;
+    match jarvis_audio::models::tts_voice(root, config, name) {
+        Ok(model) => Some(VoiceSetup {
+            name: name.to_owned(),
+            model,
+            speed: config.voice.tts_speed,
+        }),
+        Err(e) => {
+            tracing::warn!(
+                voice = name,
+                error = %jarvis_core::error_chain(&e),
+                "голос синтеза не найден — отвечаю звуковым пакетом"
+            );
+            None
+        }
+    }
 }
 
 /// Загружает пакеты команд и пишет в лог всё, что с ними не так.

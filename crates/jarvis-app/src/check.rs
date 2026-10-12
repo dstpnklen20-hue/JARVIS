@@ -137,6 +137,7 @@ fn collect(explicit_root: Option<&Path>) -> (String, Vec<Item>) {
 
     if let Some(config) = &config {
         items.push(check_voice_pack(&root, config));
+        items.push(check_tts(&root, config));
         items.push(check_voiceprint(&root, config));
         items.push(check_commands(&root, config));
         items.push(check_permissions(&root));
@@ -216,6 +217,62 @@ fn check_voice_pack(root: &Path, config: &Config) -> Item {
                 format!("{}: {}", pack.name, replies.join(", ")),
             )
         }
+        Err(e) => Item::new(Status::Fail, TITLE, error_chain(&e)),
+    }
+}
+
+/// Голос синтеза: установлен ли и синтезирует ли (короткая фраза).
+fn check_tts(root: &Path, config: &Config) -> Item {
+    const TITLE: &str = "Синтез речи";
+    let Some(name) = config.voice.tts_voice() else {
+        return Item::new(
+            Status::Skip,
+            TITLE,
+            "выключен (voice.tts = \"none\") — динамические ответы звуковым пакетом",
+        );
+    };
+    let installed = jarvis_audio::models::installed_voices(root, config).join(", ");
+    let model = match jarvis_audio::models::tts_voice(root, config, name) {
+        Ok(model) => model,
+        Err(e) => {
+            return Item::new(
+                Status::Warn,
+                TITLE,
+                format!(
+                    "голос «{name}» не установлен — ответы звуковым пакетом ({})",
+                    error_chain(&e)
+                ),
+            )
+            .with_notes(vec![format!(
+                "установлены: {}; остальные голоса: scripts\\download-models.ps1 -Full",
+                if installed.is_empty() {
+                    "нет"
+                } else {
+                    &installed
+                }
+            )]);
+        }
+    };
+    let started = std::time::Instant::now();
+    let result = jarvis_audio::tts::PiperTts::new(&model, config.voice.tts_speed).and_then(|tts| {
+        use jarvis_audio::tts::TextToSpeech as _;
+        let load = started.elapsed();
+        let t = std::time::Instant::now();
+        tts.synthesize("Проверка голоса.")
+            .map(|clip| (load, t.elapsed(), clip.duration_secs()))
+    });
+    match result {
+        Ok((load, synth, secs)) => Item::new(
+            Status::Ok,
+            TITLE,
+            format!(
+                "голос {name}, темп {}: загрузка {} мс, фраза {secs:.1} с за {} мс",
+                config.voice.tts_speed,
+                load.as_millis(),
+                synth.as_millis()
+            ),
+        )
+        .with_notes(vec![format!("установлены голоса: {installed}")]),
         Err(e) => Item::new(Status::Fail, TITLE, error_chain(&e)),
     }
 }

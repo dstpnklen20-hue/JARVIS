@@ -91,6 +91,25 @@ pub fn is_builtin(id: &str) -> bool {
     id.starts_with("builtin:")
 }
 
+/// Как назвать команду вслух: первая фраза без мест для слотов
+/// («громкость {level}» → «громкость»).
+pub fn spoken_phrase(registry: &Registry, id: &str) -> String {
+    let phrase = registry
+        .get(id)
+        .and_then(|c| c.phrases.first().map(String::as_str))
+        .or_else(|| {
+            BUILTINS
+                .iter()
+                .find(|(b, _)| *b == id)
+                .and_then(|(_, phrases)| phrases.first().copied())
+        })
+        .unwrap_or(id);
+    strip_placeholders(phrase)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn slot_kind(spec: &SlotSpec) -> SlotKind {
     match spec {
         SlotSpec::Number { min, max } => SlotKind::Number {
@@ -416,6 +435,14 @@ mod tests {
             Resolution::Command { id, .. } => id,
             other => panic!("«{text}»: {other:?}"),
         }
+    }
+
+    #[test]
+    fn spoken_phrase_has_no_placeholders() {
+        let r = registry();
+        assert_eq!(spoken_phrase(&r, "media_volume_set"), "громкость на");
+        assert_eq!(spoken_phrase(&r, BUILTIN_STOP), "стоп");
+        assert_eq!(spoken_phrase(&r, "unknown_id"), "unknown_id");
     }
 
     #[test]

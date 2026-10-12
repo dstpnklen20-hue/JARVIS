@@ -53,6 +53,58 @@
       "files": ["ten-vad.onnx"]
     },
     {
+      "id": "tts-dmitri",
+      "name": "Голос Dmitri",
+      "description": "синтез речи: мужской голос Piper (по умолчанию)",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-ru_RU-dmitri-medium.tar.bz2",
+      "sha256": "c86d0803737de13d441923ff3b3f309482fab8d7af3ec85949942809eb9a3660",
+      "size": 67188551,
+      "kind": "archive",
+      "base": "models",
+      "dir": "vits-piper-ru_RU-dmitri-medium",
+      "required": true,
+      "files": ["ru_RU-dmitri-medium.onnx", "tokens.txt", "espeak-ng-data/phontab", "espeak-ng-data/ru_dict"]
+    },
+    {
+      "id": "tts-irina",
+      "name": "Голос Irina",
+      "description": "синтез речи: женский голос Piper, самый разборчивый (voice.tts = \"irina\")",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-ru_RU-irina-medium.tar.bz2",
+      "sha256": "1fc0f54e5e084fe287c07909f2f6e0ba6d857864cf800e3ab80286a4e8233008",
+      "size": 67153308,
+      "kind": "archive",
+      "base": "models",
+      "dir": "vits-piper-ru_RU-irina-medium",
+      "required": false,
+      "files": ["ru_RU-irina-medium.onnx", "tokens.txt", "espeak-ng-data/phontab", "espeak-ng-data/ru_dict"]
+    },
+    {
+      "id": "tts-ruslan",
+      "name": "Голос Ruslan",
+      "description": "синтез речи: мужской голос Piper (voice.tts = \"ruslan\")",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-ru_RU-ruslan-medium.tar.bz2",
+      "sha256": "0690b1cad01f86e8db9ba988af24898bdc1af774e23cb2e46b9c730269b6fd83",
+      "size": 67210684,
+      "kind": "archive",
+      "base": "models",
+      "dir": "vits-piper-ru_RU-ruslan-medium",
+      "required": false,
+      "files": ["ru_RU-ruslan-medium.onnx", "tokens.txt", "espeak-ng-data/phontab", "espeak-ng-data/ru_dict"]
+    },
+    {
+      "id": "tts-denis",
+      "name": "Голос Denis",
+      "description": "синтез речи: мужской голос Piper (voice.tts = \"denis\")",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-ru_RU-denis-medium.tar.bz2",
+      "sha256": "efa4c18e0b5e32b81d1b6df36b9d312831e5d545200e27848ef926a4cd930300",
+      "size": 67190991,
+      "kind": "archive",
+      "base": "models",
+      "dir": "vits-piper-ru_RU-denis-medium",
+      "required": false,
+      "files": ["ru_RU-denis-medium.onnx", "tokens.txt", "espeak-ng-data/phontab", "espeak-ng-data/ru_dict"]
+    },
+    {
       "id": "speaker-campplus",
       "name": "CAM++ speaker",
       "description": "распознавание говорящего: Джарвис откликается только на ваш голос",

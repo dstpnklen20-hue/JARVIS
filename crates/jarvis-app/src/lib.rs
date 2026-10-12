@@ -3,4 +3,5 @@
 
 pub mod resolver;
 pub mod simulate;
+pub mod speech;
 pub mod system;

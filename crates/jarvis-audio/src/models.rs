@@ -75,6 +75,43 @@ impl SpeechModels {
     }
 }
 
+/// Голос синтеза по имени («dmitri» → ресурс `tts-dmitri`).
+pub fn tts_voice(
+    root: &Path,
+    config: &Config,
+    name: &str,
+) -> Result<crate::tts::VoiceModel, AudioError> {
+    let manifest = Manifest::load(root)?;
+    let asset = manifest.get(&format!("tts-{name}"))?;
+    let model = asset.file(
+        root,
+        config,
+        asset.files.first().map(String::as_str).unwrap_or_default(),
+    )?;
+    let dir = asset.location(root, config);
+    Ok(crate::tts::VoiceModel {
+        model,
+        tokens: dir.join("tokens.txt"),
+        data_dir: dir.join("espeak-ng-data"),
+    })
+}
+
+/// Имена установленных голосов синтеза (по порядку в `assets.json`).
+pub fn installed_voices(root: &Path, config: &Config) -> Vec<String> {
+    let Ok(manifest) = Manifest::load(root) else {
+        return Vec::new();
+    };
+    manifest
+        .assets
+        .iter()
+        .filter_map(|a| a.id.strip_prefix("tts-").map(|name| (a, name)))
+        .filter(|(a, _)| {
+            a.status(&a.location(root, config)) == jarvis_core::assets::AssetStatus::Ok
+        })
+        .map(|(_, name)| name.to_owned())
+        .collect()
+}
+
 /// sherpa-onnx принимает пути строками.
 pub(crate) fn path_str(path: &Path) -> String {
     path.to_string_lossy().into_owned()

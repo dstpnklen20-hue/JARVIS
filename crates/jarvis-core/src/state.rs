@@ -64,6 +64,8 @@ pub enum Event {
     },
     /// Периодический такт: проверка таймаутов.
     Tick,
+    /// Джарвис начал говорить синтезированную фразу такой длительности.
+    Spoke(std::time::Duration),
     /// Пункт «Пауза» в трее (переключатель).
     TogglePause,
     Pause,
@@ -201,6 +203,17 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
             ]),
         ),
         (_, E::Resume) => Transition::stay(state),
+
+        // --- своя фраза (синтез речи): пока она звучит, микрофон заглушён,
+        // поэтому ожидание ответа продлевается на её длительность ---
+        (S::AskingPermission { until }, E::Spoke(d)) => {
+            Transition::stay(S::AskingPermission { until: until + d })
+        }
+        (S::Listening { until }, E::Spoke(d)) => {
+            Transition::stay(S::Listening { until: until + d })
+        }
+        (S::FollowUp { until }, E::Spoke(d)) => Transition::stay(S::FollowUp { until: until + d }),
+        (_, E::Spoke(_)) => Transition::stay(state),
 
         // --- вопрос-разрешение ---
         (S::Listening { .. } | S::FollowUp { .. }, E::NeedPermission(id)) => Transition::to(
@@ -364,6 +377,33 @@ mod tests {
                 transition(asking(t0), event.clone(), t0, T),
                 Transition::stay(asking(t0)),
                 "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn own_speech_extends_waiting() {
+        let t0 = now();
+        let d = Duration::from_secs(3);
+        assert_eq!(
+            transition(asking(t0), Event::Spoke(d), t0, T),
+            Transition::stay(State::AskingPermission {
+                until: t0 + T.ask + d
+            })
+        );
+        let listening = State::Listening {
+            until: t0 + T.listen,
+        };
+        assert_eq!(
+            transition(listening, Event::Spoke(d), t0, T),
+            Transition::stay(State::Listening {
+                until: t0 + T.listen + d
+            })
+        );
+        for state in [State::Idle, State::Executing, State::Paused] {
+            assert_eq!(
+                transition(state, Event::Spoke(d), t0, T),
+                Transition::stay(state)
             );
         }
     }

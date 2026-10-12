@@ -7,6 +7,7 @@ mod daemon;
 mod enroll;
 mod hearing;
 mod record;
+mod say;
 mod tray;
 
 use std::path::PathBuf;
@@ -21,7 +22,7 @@ use jarvis_core::{Config, logging, root};
     name = "jarvis",
     version,
     about = "Джарвис — голосовой ассистент для ПК",
-    group(ArgGroup::new("mode").args(["check", "stop", "bench", "enroll", "enroll_from", "record"]))
+    group(ArgGroup::new("mode").args(["check", "stop", "bench", "enroll", "enroll_from", "record", "say"]))
 )]
 struct Cli {
     /// Проверить окружение, конфиг и модели, напечатать отчёт и выйти.
@@ -51,6 +52,18 @@ struct Cli {
     /// Длительность записи для --record, секунды.
     #[arg(long, value_name = "SECS", default_value_t = 5, requires = "record")]
     seconds: u32,
+
+    /// Произнести фразу голосом синтеза (послушать голос и темп).
+    #[arg(long, value_name = "TEXT")]
+    say: Option<String>,
+
+    /// Голос для --say вместо voice.tts: dmitri, irina, ruslan, denis.
+    #[arg(long, value_name = "NAME", requires = "say")]
+    voice: Option<String>,
+
+    /// Сохранить фразу --say в WAV вместо проигрывания.
+    #[arg(long, value_name = "WAV", requires = "say")]
+    out: Option<PathBuf>,
 
     /// Корень проекта (папка с config/). По умолчанию ищется от текущей
     /// папки и от папки программы вверх.
@@ -105,6 +118,15 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     }
     if let Some(path) = &cli.record {
         return record::run(&config, path, cli.seconds);
+    }
+    if let Some(text) = &cli.say {
+        return say::run(
+            &root,
+            &config,
+            text,
+            cli.voice.as_deref(),
+            cli.out.as_deref(),
+        );
     }
 
     tracing::info!(root = %root.display(), version = env!("CARGO_PKG_VERSION"), "Джарвис запущен");

@@ -12,13 +12,15 @@ use anyhow::Context as _;
 use jarvis_actions::{ActionError, CancelToken, Outcome, Sound, System};
 use jarvis_app::resolver::{
     BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS, BUILTIN_STOP, CommandResolver,
-    EarlyDecider, Resolution, hotword_phrases, is_builtin,
+    EarlyDecider, Resolution, hotword_phrases, is_builtin, spoken_phrase,
 };
+use jarvis_app::speech::{self, Speech, SpeechEvent};
 use jarvis_app::system::PlatformSystem;
 use jarvis_audio::pack::VoicePack;
 use jarvis_audio::pipeline::{MuteGate, Pipeline, PipelineEvent, PipelineSettings, WakeEvent};
 use jarvis_audio::player::Player;
 use jarvis_audio::stt::Transcript;
+use jarvis_audio::tts::VoiceModel;
 use jarvis_audio::wake::WakeMatcher;
 use jarvis_core::Config;
 use jarvis_core::commands::{ActionSpec, Command, Registry, ReplyChoice};
@@ -58,6 +60,8 @@ pub enum CoreMsg {
     },
     /// Звук из шага цепочки (`say` внутри `sequence`).
     PlaySound(Sound),
+    /// Поток синтеза речи.
+    Speech(SpeechEvent),
     TogglePause,
     EmergencyStop,
     ForgetPermissions,
@@ -77,8 +81,30 @@ pub struct CoreParams {
     /// Для перезагрузки команд: папка команд, слова активации.
     pub commands_dir: PathBuf,
     pub wake_matcher: WakeMatcher,
+    /// Голос синтеза; `None` — только звуковой пакет.
+    pub voice: Option<VoiceSetup>,
+    /// Запущены от администратора — предупредить голосом (раздел 2.5 ТЗ).
+    pub elevated: bool,
     pub ui: Sender<Indicator>,
     pub waker: Waker,
+}
+
+pub struct VoiceSetup {
+    pub name: String,
+    pub model: VoiceModel,
+    pub speed: f32,
+}
+
+/// Зачем синтезируется фраза — от этого зависит, нужна ли она ещё, когда
+/// будет готова, и чем её заменить, если синтез не удался.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// Вопрос-разрешение для окна с этим номером.
+    Ask(u64),
+    /// «Вы имели в виду X или Y?»
+    Clarify,
+    /// Предупреждение без ожидания ответа.
+    Notice,
 }
 
 /// Что услышали — для журнала и подстановки слотов.
@@ -173,6 +199,17 @@ pub struct Core {
     /// Слух сообщил о проблеме — показываем её, пока не наладится.
     problem: Option<String>,
     ready: bool,
+    speech: Option<Speech>,
+    /// Голос загружен — вопрос звучит синтезом, а не фразой из пакета.
+    speech_ready: bool,
+    /// Номер последнего запроса синтеза: старые результаты не нужны.
+    speech_id: u64,
+    speaking: Option<Purpose>,
+    /// Вопрос-разрешение звучит до этого момента (ответ кнопкой его обрывает).
+    asking_aloud_until: Option<Instant>,
+    /// Ответ «не понял» заменён уточняющим вопросом.
+    clarifying: bool,
+    warn_elevated: bool,
 }
 
 impl Core {
@@ -190,6 +227,19 @@ impl Core {
             Arc::clone(&gate),
         )
         .context("не удалось запустить поток слуха")?;
+        let speech = p.voice.and_then(|voice| {
+            let speech_events = events.clone();
+            Speech::spawn(
+                voice.name,
+                voice.model,
+                voice.speed,
+                Box::new(move |event| {
+                    let _ = speech_events.send(CoreMsg::Speech(event));
+                }),
+            )
+            .inspect_err(|e| tracing::error!(error = %e, "не удалось запустить поток синтеза"))
+            .ok()
+        });
         let nlu = &p.config.nlu;
         Ok(Self {
             state: State::Idle,
@@ -227,6 +277,13 @@ impl Core {
             waker: p.waker,
             problem: None,
             ready: false,
+            speech,
+            speech_ready: false,
+            speech_id: 0,
+            speaking: None,
+            asking_aloud_until: None,
+            clarifying: false,
+            warn_elevated: p.elevated,
         })
     }
 
@@ -242,6 +299,7 @@ impl Core {
                     self.play(if ok { Reply::Done } else { Reply::Failed });
                 }
                 Ok(CoreMsg::PlaySound(sound)) => self.play_sound(&sound),
+                Ok(CoreMsg::Speech(event)) => self.on_speech(event),
                 Ok(CoreMsg::Pipeline(event)) => self.on_pipeline(event),
                 Ok(CoreMsg::ActionDone { generation, result }) => {
                     self.on_action_done(generation, result)
@@ -342,6 +400,11 @@ impl Core {
         let answering = matches!(self.state, State::Idle | State::FollowUp { .. });
         self.apply(Event::WakeWord);
         if answering {
+            // Пока человек договаривает команду, голос успеет загрузиться —
+            // вдруг понадобится вопрос-разрешение.
+            if let Some(speech) = &self.speech {
+                speech.prepare();
+            }
             tracing::info!(
                 heard = %wake.heard,
                 voice = ?wake.similarity,
@@ -409,9 +472,18 @@ impl Core {
         match resolution {
             Resolution::Command { id, score, slots } => self.command(id, t.text, score, slots, now),
             Resolution::Ambiguous { first, second } => {
-                // Уточняющий вопрос голосом («X или Y?») — с синтезом речи (этап 5).
                 tracing::info!(%first, %second, "неоднозначно — переспрашиваю");
+                // Уточняющий вопрос — только после «Джарвис»: в FOLLOW_UP
+                // непонятная фраза — скорее посторонний разговор.
+                if matches!(self.state, State::Listening { .. }) {
+                    let text = speech::clarify_text(
+                        &spoken_phrase(&self.registry, &first),
+                        &spoken_phrase(&self.registry, &second),
+                    );
+                    self.clarifying = self.speak(text, Purpose::Clarify);
+                }
                 self.apply(Event::NotUnderstood);
+                self.clarifying = false;
             }
             Resolution::NotUnderstood { best } => {
                 tracing::info!(?best, "не понял");
@@ -559,6 +631,21 @@ impl Core {
         self.ask_generation += 1;
         let generation = self.ask_generation;
         let offer_always = self.pending.as_ref().is_some_and(|p| p.offer_always);
+        let slots = self
+            .pending
+            .as_ref()
+            .map(|p| p.heard.slots.clone())
+            .unwrap_or_default();
+        let question = if id == BUILTIN_FORGET_PERMISSIONS {
+            speech::ask_forget_permissions_text()
+        } else {
+            match self.registry.get(id) {
+                Some(command) => speech::ask_text(command, &slots),
+                None => return,
+            }
+        };
+        // Без голоса синтеза звучит «ask» из звукового пакета (см. `apply`).
+        self.speak(question, Purpose::Ask(generation));
         let spec = if id == BUILTIN_FORGET_PERMISSIONS {
             DialogSpec {
                 title: "Джарвис — подтверждение".into(),
@@ -575,11 +662,6 @@ impl Core {
             let Some(command) = self.registry.get(id) else {
                 return;
             };
-            let slots = self
-                .pending
-                .as_ref()
-                .map(|p| p.heard.slots.clone())
-                .unwrap_or_default();
             permission_dialog(command, offer_always, &slots)
         };
         let events = self.events.clone();
@@ -594,6 +676,14 @@ impl Core {
 
     fn close_dialog(&mut self) {
         self.ask_generation += 1;
+        // Ответили кнопкой, пока вопрос ещё звучит, — договаривать незачем.
+        if self
+            .asking_aloud_until
+            .take()
+            .is_some_and(|until| Instant::now() < until)
+        {
+            self.player.stop();
+        }
         if let Some(mut dialog) = self.dialog.take() {
             dialog.close();
         }
@@ -869,6 +959,105 @@ impl Core {
         }
     }
 
+    // ---------- синтез речи ----------
+
+    /// Отправляет фразу на синтез. `false` — голоса нет (не настроен, ещё
+    /// грузится или не загрузился).
+    fn speak(&mut self, text: String, purpose: Purpose) -> bool {
+        let Some(speech) = self.speech.as_ref().filter(|_| self.speech_ready) else {
+            return false;
+        };
+        self.speech_id += 1;
+        self.speaking = Some(purpose);
+        speech.say(self.speech_id, text);
+        true
+    }
+
+    /// Ответ из звукового пакета, который заменяет синтезированная фраза.
+    fn spoken_instead(&mut self, reply: Reply) -> bool {
+        match reply {
+            Reply::Ask => self.speech_ready,
+            Reply::NotUnderstood => std::mem::take(&mut self.clarifying),
+            _ => false,
+        }
+    }
+
+    fn on_speech(&mut self, event: SpeechEvent) {
+        match event {
+            SpeechEvent::Ready { voice, load_time } => {
+                tracing::info!(%voice, ms = load_time.as_millis() as u64, "голос синтеза загружен");
+                self.speech_ready = true;
+                if std::mem::take(&mut self.warn_elevated) {
+                    self.speak(speech::elevated_warning_text(), Purpose::Notice);
+                }
+            }
+            SpeechEvent::Unavailable(why) => {
+                tracing::error!(%why, "голос синтеза не загрузился — отвечаю звуковым пакетом");
+                self.speech = None;
+                self.speech_ready = false;
+            }
+            SpeechEvent::Clip {
+                id,
+                clip,
+                synth_time,
+            } => {
+                let Some(purpose) = self.take_speaking(id) else {
+                    return;
+                };
+                match self.player.play_clip(&clip) {
+                    Ok(duration) => {
+                        tracing::debug!(
+                            ?purpose,
+                            synth_ms = synth_time.as_millis() as u64,
+                            secs = duration.as_secs_f32(),
+                            "говорю"
+                        );
+                        self.gate.mute_for(duration + ECHO_TAIL);
+                        if matches!(purpose, Purpose::Ask(_)) {
+                            self.asking_aloud_until = Some(Instant::now() + duration);
+                        }
+                        self.apply(Event::Spoke(duration + ECHO_TAIL));
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %jarvis_core::error_chain(&e), "не удалось проиграть фразу");
+                        self.speech_fallback(purpose);
+                    }
+                }
+            }
+            SpeechEvent::Failed { id, why } => {
+                if let Some(purpose) = self.take_speaking(id) {
+                    tracing::error!(%why, ?purpose, "синтез не удался");
+                    self.speech_fallback(purpose);
+                }
+            }
+        }
+    }
+
+    /// Назначение готовой фразы, если она всё ещё к месту.
+    fn take_speaking(&mut self, id: u64) -> Option<Purpose> {
+        if id != self.speech_id {
+            return None;
+        }
+        let purpose = self.speaking.take()?;
+        let relevant = match purpose {
+            Purpose::Ask(generation) => {
+                generation == self.ask_generation
+                    && matches!(self.state, State::AskingPermission { .. })
+            }
+            Purpose::Clarify => matches!(self.state, State::Listening { .. }),
+            Purpose::Notice => self.state != State::Paused,
+        };
+        relevant.then_some(purpose)
+    }
+
+    fn speech_fallback(&mut self, purpose: Purpose) {
+        match purpose {
+            Purpose::Ask(_) => self.play(Reply::Ask),
+            Purpose::Clarify => self.play(Reply::NotUnderstood),
+            Purpose::Notice => {}
+        }
+    }
+
     fn apply(&mut self, event: Event) {
         let before = self.state;
         let tr = transition(self.state, event.clone(), Instant::now(), self.timings);
@@ -891,6 +1080,7 @@ impl Core {
 
         for effect in tr.effects {
             match effect {
+                Effect::PlayReply(reply) if self.spoken_instead(reply) => {}
                 Effect::PlayReply(reply) => self.play(reply),
                 Effect::SetListening(on) => self.pipeline.set_listening(on),
                 Effect::SetTranscribing(on) => {
@@ -902,6 +1092,8 @@ impl Core {
                 Effect::CloseAsk => self.close_dialog(),
                 Effect::StopAll => {
                     self.player.stop();
+                    self.speaking = None;
+                    self.asking_aloud_until = None;
                     // Скрипт — завершить (всё дерево процессов), ожидания — прервать.
                     if let Some(cancel) = self.cancel.take() {
                         cancel.cancel();
@@ -941,10 +1133,8 @@ impl Core {
 /// Текст окна-вопроса: что именно произойдёт (раздел 2.1 ТЗ) — с уже
 /// подставленными значениями слотов.
 fn permission_dialog(command: &Command, offer_always: bool, slots: &SlotValues) -> DialogSpec {
-    let phrase = command
-        .phrases
-        .first()
-        .map_or(command.id.as_str(), String::as_str);
+    let phrase = speech::filled_phrase(command, slots);
+    let description = jarvis_core::slots::fill(&command.description, slots);
     let action = command.action.with_slots(slots);
     let details = match &action {
         ActionSpec::OpenUrl { url } => format!("Адрес: {url}"),
@@ -999,7 +1189,10 @@ fn permission_dialog(command: &Command, offer_always: bool, slots: &SlotValues) 
     };
     DialogSpec {
         title: "Джарвис — разрешение".into(),
-        heading: format!("Сэр, команда «{phrase}» {}.", command.description),
+        heading: format!(
+            "Сэр, команда «{phrase}» {}.",
+            description.trim().trim_end_matches('.')
+        ),
         text: format!(
             "{details}\nПакет команд: {} ({})\n\nРазрешить? Ответьте голосом — {voice} — или кнопкой. \
              Без ответа через 10 секунд команда не выполнится.",

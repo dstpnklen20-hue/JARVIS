@@ -16,6 +16,7 @@ pub mod player;
 pub mod resample;
 pub mod speaker;
 pub mod stt;
+pub mod tts;
 pub mod vad;
 pub mod wake;
 pub mod wav;

@@ -85,6 +85,94 @@ fn wake_word_fires_once_in_every_wake_recording() {
     }
 }
 
+/// Сравнение голосов синтеза: разборчивость (сколько слов распознаётся
+/// нашей моделью) и скорость. Папка с распакованными голосами —
+/// в переменной JARVIS_TTS_EVAL_DIR.
+#[test]
+#[ignore = "оценка голосов: JARVIS_TTS_EVAL_DIR"]
+fn tts_voice_evaluation() {
+    use jarvis_audio::tts::{PiperTts, TextToSpeech, VoiceModel};
+    let Some(dir) = std::env::var_os("JARVIS_TTS_EVAL_DIR") else {
+        return;
+    };
+    let phrases = [
+        "Сэр, команда открой ютуб откроет YouTube в браузере. Разрешить?",
+        "Вы имели в виду открой гугл или открой яндекс?",
+        "Сэр, команда выключи компьютер выключит компьютер. Несохранённые данные пропадут.",
+        "Запрос выполнен, сэр. Громкость установлена на сорок процентов.",
+        "Сэр, я запущен с правами администратора.",
+    ];
+    let (_, models) = setup();
+    let recognizer = create_recognizer(&models.asr, Endpointing::default()).unwrap();
+    let mut voices: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    voices.sort();
+    for voice_dir in voices {
+        let voice = VoiceModel::from_dir(&voice_dir).unwrap();
+        let started = std::time::Instant::now();
+        let tts = PiperTts::new(&voice, 1.0).unwrap();
+        let load = started.elapsed();
+        let (mut words, mut correct, mut audio, mut synth) = (0usize, 0usize, 0f32, 0f32);
+        for phrase in phrases {
+            let t = std::time::Instant::now();
+            let clip = tts.synthesize(phrase).unwrap();
+            synth += t.elapsed().as_secs_f32();
+            audio += clip.duration_secs();
+            let heard = transcribe(&recognizer, &clip.resampled(MODEL_RATE).unwrap().samples);
+            let heard_words = normalize_words(&heard);
+            let expected = normalize_words(phrase);
+            words += expected.len();
+            correct += expected.iter().filter(|w| heard_words.contains(w)).count();
+        }
+        eprintln!(
+            "{:<38} загрузка {:>5} мс | разборчивость {:>3.0}% | RTF {:.3} | {:.1} с речи",
+            voice_dir.file_name().unwrap().to_string_lossy(),
+            load.as_millis(),
+            correct as f32 * 100.0 / words as f32,
+            synth / audio,
+            audio
+        );
+    }
+}
+
+/// Голос по умолчанию произносит вопрос-разрешение разборчиво: наша же
+/// модель распознавания узнаёт ключевые слова, числа читаются словами.
+#[test]
+#[ignore = "нужны модели: scripts/download-models.ps1"]
+fn default_voice_is_intelligible() {
+    use jarvis_audio::tts::{PiperTts, TextToSpeech};
+    let (config, models) = setup();
+    let voice = jarvis_audio::models::tts_voice(&root(), config, "dmitri").expect(NEEDS_MODELS);
+    let tts = PiperTts::new(&voice, 1.0).unwrap();
+    let recognizer = create_recognizer(&models.asr, Endpointing::default()).unwrap();
+    for (phrase, expected) in [
+        (
+            "Сэр, команда «громкость на 40» установит громкость 40%. Разрешить?",
+            &["громкост", "сорок", "процент", "разреш"][..],
+        ),
+        (
+            // Синтез случаен (VITS), распознавание иногда слышит «открою» —
+            // поэтому проверяются основы слов.
+            "Сэр, вы имели в виду «открой гугл» или «открой яндекс»?",
+            &["имели", "откр", "или"][..],
+        ),
+    ] {
+        let clip = tts.synthesize(phrase).unwrap();
+        let heard = transcribe(&recognizer, &clip.resampled(MODEL_RATE).unwrap().samples);
+        let words = normalize_words(&heard);
+        eprintln!("«{phrase}» → «{heard}»");
+        for w in expected {
+            assert!(
+                words.iter().any(|h| h.starts_with(w)),
+                "«{w}» не слышно в «{heard}»"
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "нужны модели: scripts/download-models.ps1"]
 fn wake_word_never_fires_on_ordinary_speech() {

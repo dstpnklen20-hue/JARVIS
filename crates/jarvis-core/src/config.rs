@@ -140,7 +140,20 @@ pub struct Voice {
     /// Папка звукового пакета внутри `paths.sounds`.
     pub pack: String,
     pub volume: f32,
+    /// Голос синтеза («dmitri»…) или «none».
+    pub tts: String,
+    pub tts_speed: f32,
 }
+
+impl Voice {
+    /// Голос синтеза, если он включён.
+    pub fn tts_voice(&self) -> Option<&str> {
+        let name = self.tts.trim();
+        (!name.eq_ignore_ascii_case("none") && !name.is_empty()).then_some(name)
+    }
+}
+
+pub const TTS_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -374,6 +387,23 @@ impl Config {
             VOLUME_RANGE.contains(&self.voice.volume),
             "voice.volume",
             out_of_range(self.voice.volume, &VOLUME_RANGE),
+        );
+        check(
+            self.voice
+                .tts
+                .trim()
+                .chars()
+                .all(|c| c.is_ascii_lowercase()),
+            "voice.tts",
+            format!(
+                "«{}» — имя голоса латиницей (dmitri, irina…) или none",
+                self.voice.tts
+            ),
+        );
+        check(
+            TTS_SPEED_RANGE.contains(&self.voice.tts_speed),
+            "voice.tts_speed",
+            out_of_range(self.voice.tts_speed, &TTS_SPEED_RANGE),
         );
         check(
             FOLLOW_UP_SECS_RANGE.contains(&self.session.follow_up_secs),
