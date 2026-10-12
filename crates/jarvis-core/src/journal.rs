@@ -102,6 +102,13 @@ impl ActionJournal {
 }
 
 /// Текущее время для записи журнала (местное, с часовым поясом).
+/// Местный час (0–23) — для приветствия по времени суток.
+pub fn local_hour() -> u8 {
+    time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .hour()
+}
+
 pub fn now() -> String {
     let format = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_minute]"

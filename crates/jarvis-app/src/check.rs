@@ -211,11 +211,23 @@ fn check_voice_pack(root: &Path, config: &Config) -> Item {
                 .iter()
                 .map(|r| format!("{} ×{}", r.key(), pack.variants(*r).len()))
                 .collect();
+            let greetings: Vec<String> = jarvis_audio::pack::DayPart::ALL
+                .iter()
+                .map(|p| (p.key(), pack.greetings(*p).len()))
+                .filter(|(_, n)| *n > 0)
+                .map(|(k, n)| format!("{k} ×{n}"))
+                .collect();
+            let notes = if greetings.is_empty() {
+                vec!["приветствий при запуске нет".to_owned()]
+            } else {
+                vec![format!("приветствия: {}", greetings.join(", "))]
+            };
             Item::new(
                 Status::Ok,
                 TITLE,
                 format!("{}: {}", pack.name, replies.join(", ")),
             )
+            .with_notes(notes)
         }
         Err(e) => Item::new(Status::Fail, TITLE, error_chain(&e)),
     }

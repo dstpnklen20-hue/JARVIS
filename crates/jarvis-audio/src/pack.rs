@@ -8,6 +8,16 @@
 //! ```
 //!
 //! На каждый ответ можно положить несколько вариантов — Джарвис чередует их.
+//!
+//! Необязательные приветствия при запуске — по времени суток:
+//!
+//! ```toml
+//! [greetings]
+//! morning = ["greeting_1.wav"]   # 5–11 ч
+//! day = ["greeting_2.wav"]       # 12–16 ч
+//! evening = ["greeting_3.wav"]   # 17–22 ч
+//! night = ["greeting_4.wav"]     # 23–4 ч; нет — звучит вечернее
+//! ```
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -25,6 +35,39 @@ pub const PACK_FILE: &str = "pack.toml";
 struct PackFile {
     name: String,
     replies: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    greetings: BTreeMap<String, Vec<String>>,
+}
+
+/// Часть суток — для приветствия при запуске.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DayPart {
+    Morning,
+    Day,
+    Evening,
+    Night,
+}
+
+impl DayPart {
+    pub const ALL: [DayPart; 4] = [Self::Morning, Self::Day, Self::Evening, Self::Night];
+
+    pub fn from_hour(hour: u8) -> Self {
+        match hour {
+            5..=11 => Self::Morning,
+            12..=16 => Self::Day,
+            17..=22 => Self::Evening,
+            _ => Self::Night,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Morning => "morning",
+            Self::Day => "day",
+            Self::Evening => "evening",
+            Self::Night => "night",
+        }
+    }
 }
 
 /// Пакет, загруженный в память при старте (ответ звучит без задержки на диск).
@@ -33,6 +76,7 @@ pub struct VoicePack {
     pub name: String,
     pub dir: PathBuf,
     clips: HashMap<Reply, Vec<Clip>>,
+    greetings: HashMap<DayPart, Vec<Clip>>,
 }
 
 impl VoicePack {
@@ -78,15 +122,41 @@ impl VoicePack {
                 Reply::Wake.key()
             )));
         }
+        let mut greetings = HashMap::new();
+        for (key, files) in file.greetings {
+            let part = DayPart::ALL
+                .into_iter()
+                .find(|p| p.key() == key)
+                .ok_or_else(|| {
+                    bad(format!(
+                        "неизвестная часть суток `{key}` в [greetings]; допустимые: morning, day, evening, night"
+                    ))
+                })?;
+            let loaded = files
+                .iter()
+                .map(|f| wav::read(&dir.join(f)))
+                .collect::<Result<Vec<_>, _>>()?;
+            greetings.insert(part, loaded);
+        }
         Ok(Self {
             name: file.name,
             dir: dir.to_path_buf(),
             clips,
+            greetings,
         })
     }
 
     pub fn variants(&self, reply: Reply) -> &[Clip] {
         self.clips.get(&reply).map_or(&[], Vec::as_slice)
+    }
+
+    /// Приветствия для части суток; ночью без своих — вечерние.
+    pub fn greetings(&self, part: DayPart) -> &[Clip] {
+        let own = self.greetings.get(&part).map_or(&[][..], Vec::as_slice);
+        if own.is_empty() && part == DayPart::Night {
+            return self.greetings(DayPart::Evening);
+        }
+        own
     }
 }
 
@@ -124,6 +194,28 @@ mod tests {
         assert_eq!(pack.variants(Reply::Failed).len(), 1);
         assert!(pack.variants(Reply::Done).is_empty());
         assert_eq!(pack.variants(Reply::Wake)[0].sample_rate, 16_000);
+    }
+
+    #[test]
+    fn greetings_by_part_of_day() {
+        let (_dir, pack) = load_pack(
+            "name = \"x\"\n[replies]\nwake = [\"a.wav\"]\n[greetings]\nmorning = [\"a.wav\"]\nevening = [\"a.wav\", \"b.wav\"]\n",
+            &["a.wav", "b.wav"],
+        );
+        let pack = pack.unwrap();
+        assert_eq!(pack.greetings(DayPart::Morning).len(), 1);
+        assert!(pack.greetings(DayPart::Day).is_empty());
+        assert_eq!(pack.greetings(DayPart::Night).len(), 2, "ночью — вечерние");
+        assert_eq!(DayPart::from_hour(7), DayPart::Morning);
+        assert_eq!(DayPart::from_hour(12), DayPart::Day);
+        assert_eq!(DayPart::from_hour(22), DayPart::Evening);
+        assert_eq!(DayPart::from_hour(3), DayPart::Night);
+
+        let (_dir, bad) = load_pack(
+            "name = \"x\"\n[replies]\nwake = [\"a.wav\"]\n[greetings]\nnoon = [\"a.wav\"]\n",
+            &["a.wav"],
+        );
+        assert!(bad.unwrap_err().to_string().contains("noon"));
     }
 
     #[test]

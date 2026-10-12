@@ -16,7 +16,7 @@ use jarvis_app::resolver::{
 };
 use jarvis_app::speech::{self, Speech, SpeechEvent};
 use jarvis_app::system::PlatformSystem;
-use jarvis_audio::pack::VoicePack;
+use jarvis_audio::pack::{DayPart, VoicePack};
 use jarvis_audio::pipeline::{MuteGate, Pipeline, PipelineEvent, PipelineSettings, WakeEvent};
 use jarvis_audio::player::Player;
 use jarvis_audio::stt::Transcript;
@@ -211,6 +211,8 @@ pub struct Core {
     clarifying: bool,
     /// Сколько Джарвис проговорил с прошлого `apply` (см. `flush_spoke`).
     spoke_pending: Duration,
+    /// Приветствие при запуске уже прозвучало (слух может перезапуститься).
+    greeted: bool,
     warn_elevated: bool,
 }
 
@@ -286,6 +288,7 @@ impl Core {
             asking_aloud_until: None,
             clarifying: false,
             spoke_pending: Duration::ZERO,
+            greeted: false,
             warn_elevated: p.elevated,
         })
     }
@@ -370,6 +373,10 @@ impl Core {
                 );
                 self.ready = true;
                 self.refresh_ui();
+                if !std::mem::replace(&mut self.greeted, true) && self.config.general.greet_on_start
+                {
+                    self.greet();
+                }
             }
             PipelineEvent::Listening {
                 device,
@@ -409,8 +416,10 @@ impl Core {
         self.apply(Event::WakeWord);
         if answering {
             // Пока человек договаривает команду, голос успеет загрузиться —
-            // вдруг понадобится вопрос-разрешение.
-            if let Some(speech) = &self.speech {
+            // вдруг понадобится вопрос-разрешение с подробностями.
+            if let Some(speech) = &self.speech
+                && self.config.voice.spoken_details
+            {
                 speech.prepare();
             }
             tracing::info!(
@@ -970,6 +979,30 @@ impl Core {
         }
     }
 
+    /// Приветствие при запуске по времени суток («Доброе утро, сэр»), если
+    /// оно есть в звуковом пакете.
+    fn greet(&mut self) {
+        let part = DayPart::from_hour(jarvis_core::journal::local_hour());
+        let variants = self.pack.greetings(part);
+        if variants.is_empty() {
+            return;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos() as usize);
+        let index = nanos % variants.len();
+        let clip = variants[index].clone();
+        match self.player.play_clip(&clip) {
+            Ok(d) => {
+                tracing::info!(part = part.key(), "приветствие");
+                self.muted_for(d);
+            }
+            Err(e) => {
+                tracing::warn!(error = %jarvis_core::error_chain(&e), "не удалось поздороваться")
+            }
+        }
+    }
+
     fn play_sound(&mut self, sound: &Sound) {
         let duration = match sound {
             Sound::Reply(key) => match Reply::ALL.into_iter().find(|r| r.key() == key) {
@@ -996,6 +1029,12 @@ impl Core {
     /// Отправляет фразу на синтез. `false` — голоса нет (не настроен, ещё
     /// грузится или не загрузился).
     fn speak(&mut self, text: String, purpose: Purpose) -> bool {
+        // Подробности голосом выключены — вопрос и уточнение звучат фразами
+        // звукового пакета (голосом пакета), подробности — в окне.
+        let details = matches!(purpose, Purpose::Ask(_) | Purpose::Clarify);
+        if details && !self.config.voice.spoken_details {
+            return false;
+        }
         let Some(speech) = self.speech.as_ref().filter(|_| self.speech_ready) else {
             return false;
         };
@@ -1008,7 +1047,7 @@ impl Core {
     /// Ответ из звукового пакета, который заменяет синтезированная фраза.
     fn spoken_instead(&mut self, reply: Reply) -> bool {
         match reply {
-            Reply::Ask => self.speech_ready,
+            Reply::Ask => self.speech_ready && self.config.voice.spoken_details,
             Reply::NotUnderstood => std::mem::take(&mut self.clarifying),
             _ => false,
         }

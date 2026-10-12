@@ -37,6 +37,12 @@ SOURCES = {"итог": None, "f5v2": OUT / "f5v2", "раунд1": OUT / "f5"}
 YES_TAKE = OUT / "f5_yes" / "wake_1_0.6_1" / "ref_short_6.wav"
 # Эталон из фильма — тоже в «выполнено».
 ETALON = "Запрос выполнен сэр"
+# Вопрос-разрешение — одна общая фраза, подробности в окне (ваше решение).
+# Прежние варианты ask_* — в запасе.
+ASK = [OUT / "f5_ask_best" / "ask_generic.wav"]
+ASK_SPARE = {"ask_generic_sir": OUT / "f5_ask_best" / "ask_generic_sir.wav"}
+# Приветствия при запуске: фраза → часть суток.
+GREETINGS = {"greeting_1": "morning", "greeting_2": "day", "greeting_3": "evening", "greeting_4": "night"}
 
 
 def rated() -> dict[str, list[tuple[str, str]]]:
@@ -61,12 +67,14 @@ def main() -> None:
     (PACK / "extra").mkdir(parents=True)
 
     groups: dict[str, list[Path]] = defaultdict(list)
+    greetings: dict[str, list[Path]] = defaultdict(list)
+    extra: list[Path] = []
     choices = rated()
     choices["wake_1"] = [("yes", "")]
     choices.setdefault("ok_0", []).append(("etalon", ""))
     for pid in sorted(choices):
         group = pid.rsplit("_", 1)[0]
-        for source, take in choices[pid]:
+        for n, (source, take) in enumerate(choices[pid], 1):
             if source == "итог":
                 src, ready = OUT / "f5v2_best" / f"{pid}.wav", True
             elif source == "yes":
@@ -75,23 +83,43 @@ def main() -> None:
                 src, ready = etalon_path, False
             else:
                 src, ready = SOURCES[source] / pid / f"{take}.wav", False
-            index = len(groups[group]) + 1
-            dst = (PACK if group in REPLIES else PACK / "extra") / f"{group}_{index}.wav"
+            # Вопрос — общая фраза ASK, прежние варианты — в запас.
+            in_pack = group in REPLIES and group != "ask"
+            if in_pack:
+                dst = PACK / f"{group}_{len(groups[group]) + 1}.wav"
+            elif pid in GREETINGS:
+                dst = PACK / f"{pid}_{n}.wav"
+            else:
+                dst = PACK / "extra" / f"{pid}_{n}.wav"
             if ready:
                 shutil.copyfile(src, dst)
             else:
                 finalize(src, dst)
                 polish(dst, target)
-            groups[group].append(dst)
+            if in_pack:
+                groups[group].append(dst)
+            elif pid in GREETINGS:
+                greetings[GREETINGS[pid]].append(dst)
+            else:
+                extra.append(dst)
+    for i, src in enumerate(ASK, 1):
+        dst = PACK / f"ask_{i}.wav"
+        shutil.copyfile(src, dst)
+        groups["ask"].append(dst)
+    for name, src in ASK_SPARE.items():
+        shutil.copyfile(src, PACK / "extra" / f"{name}.wav")
+        extra.append(PACK / "extra" / f"{name}.wav")
+
+    def files(paths: list[Path]) -> str:
+        return ", ".join(f'"{p.name}"' for p in paths)
 
     lines = ['name = "Джарвис (голос по эталону, только для личного использования)"', "", "[replies]"]
-    for reply in REPLIES:
-        files = ", ".join(f'"{p.name}"' for p in groups.get(reply, []))
-        lines.append(f"{reply} = [{files}]")
+    lines += [f"{reply} = [{files(groups.get(reply, []))}]" for reply in REPLIES]
+    lines += ["", "[greetings]"]
+    lines += [f"{part} = [{files(greetings[part])}]" for part in ("morning", "day", "evening", "night") if greetings[part]]
     (PACK / "pack.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print((PACK / "pack.toml").read_text(encoding="utf-8"))
-    extra = sorted(p.name for g, ps in groups.items() if g not in REPLIES for p in ps)
-    print("Запас для команд (extra):", ", ".join(extra))
+    print("Запас для команд (extra):", ", ".join(sorted(p.name for p in extra)))
 
 
 if __name__ == "__main__":

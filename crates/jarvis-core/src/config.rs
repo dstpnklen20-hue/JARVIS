@@ -143,6 +143,11 @@ pub struct Voice {
     /// Голос синтеза («dmitri»…) или «none».
     pub tts: String,
     pub tts_speed: f32,
+    /// Озвучивать подробности синтезом (вопрос-разрешение с описанием
+    /// команды, «вы имели в виду X или Y?»). Выключено — вопрос и уточнение
+    /// звучат фразами звукового пакета (`ask`, `not_understood`), подробности —
+    /// в окне.
+    pub spoken_details: bool,
 }
 
 impl Voice {
@@ -160,6 +165,9 @@ pub const TTS_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 pub struct General {
     /// Распознавать и журналировать команды, но не выполнять их.
     pub dry_run: bool,
+    /// Поздороваться при запуске по времени суток (если в звуковом пакете
+    /// есть приветствия).
+    pub greet_on_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
