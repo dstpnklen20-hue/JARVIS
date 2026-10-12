@@ -17,3 +17,12 @@
 # Отладочные записи аудио
 /recordings/
 /commands/examples/notes.txt
+
+# Обработка голоса (Python-окружение, скачанные модели, результаты)
+/tools/voice/.venv/
+/tools/voice/models/
+/tools/voice/out/
+__pycache__/
+
+# Звуковые пакеты с чужими голосами — только для личного использования
+/sounds/jarvis/
