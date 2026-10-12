@@ -41,6 +41,38 @@ github.com/microsoft/DNS-Challenge (папка `DNSMOS/DNSMOS`).
 5. `.venv\...\python tools\voice\make_pack.py` — звуковой пакет `sounds/jarvis/`; включить:
    `[voice] pack = "jarvis"` в `config/user.toml`.
 
+## Новые реплики голосом эталона
+
+Клонирование голоса — Chatterbox Multilingual (MIT, русский поддерживается), образец — эталон
+«Запрос выполнен сэр». Отдельное окружение `.venv-tts`; Chatterbox просит torch 2.6, который не
+поддерживает RTX 50-й серии, поэтому ставится поверх torch cu128 без зависимостей:
+
+```powershell
+py -3.12 -m venv tools\voice\.venv-tts
+tools\voice\.venv-tts\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+tools\voice\.venv-tts\Scripts\python.exe -m pip install "numpy<2" librosa==0.11.0 s3tokenizer transformers==5.2.0 diffusers==0.29.0 resemble-perth conformer==0.3.2 safetensors==0.5.3 pyloudnorm omegaconf pykakasi==2.3.0 soundfile
+tools\voice\.venv-tts\Scripts\python.exe -m pip install --no-deps chatterbox-tts
+```
+
+Китайский сегментатор `spacy-pkuseg` не ставить: он при загрузке качает словарь с GitHub и падает
+по тайм-ауту, а для русского не нужен.
+
+```powershell
+# все фразы пакета (clone.py, PHRASES) по 4 дубля
+tools\voice\.venv-tts\Scripts\python.exe tools\voice\clone.py
+# своя фраза
+tools\voice\.venv-tts\Scripts\python.exe tools\voice\clone.py "Добрый вечер, сэр." --id greeting
+# лучший дубль каждой фразы -> out/tts_best/<id>.wav, отчёт out/tts_report.csv
+tools\voice\.venv\Scripts\python.exe tools\voice\pick_tts.py
+```
+
+Замеры (16 фраз × 2 образца × 4 дубля): выбранные дубли похожи на эталон по тембру так же, как
+настоящие реплики из фильма (0.65 против 0.64), DNSMOS 3.19 против 3.26. Образец «только эталон»
+лучше, чем 10 с из нескольких реплик (тембр 0.63 против 0.54). Скорость — ~6–7 с на фразу
+(RTF ~2–2.5 на ноутбучной RTX 5070 Ti): годится для заготовок, но не для ответа на лету.
+
+## Прочее
+
 `score.py` — все варианты всех реплик с оценками; `diagnose.py "часть имени"` — на каком шаге
 портится конкретная реплика.
 

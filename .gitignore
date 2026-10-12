@@ -29,3 +29,4 @@ __pycache__/
 /tools/voice/.venv-enhance/
 # Модели ClearerVoice (качаются в checkpoints/ рядом с местом запуска)
 /checkpoints/
+/tools/voice/.venv-tts/

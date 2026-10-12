@@ -1,8 +1,8 @@
 """Звуковой пакет sounds/jarvis/ из очищенных реплик (tools/voice/out/clean).
 
 Пакет только для личного использования — в git не попадает (.gitignore).
-Чего в репликах нет («не удалось», «разрешите?»), берётся из стандартного
-пакета, пока не будет голоса синтеза Джарвиса.
+Чего в репликах нет («не удалось», «разрешите?»), синтезировано голосом
+эталона (out/tts_best/).
 Запуск: tools\\voice\\.venv\\Scripts\\python.exe tools\\voice\\make_pack.py
 """
 
@@ -16,19 +16,19 @@ CLEAN = ROOT / "tools" / "voice" / "out" / "clean"
 PACK = ROOT / "sounds" / "jarvis"
 PREFIX = "Jarvis Sound Pack от Jarvis Desktop__"
 
-# Только реплики, близкие к эталону «Запрос выполнен сэр» (out/report.csv).
-# «К вашим услугам», «Всегда к вашим услугам», «Есть» — испорчены в самом
-# фильме (DNSMOS ≤ 2.4), в пакет не взяты.
+# Настоящие реплики, близкие к эталону «Запрос выполнен сэр» (out/report.csv),
+# и синтез голосом эталона «tts:<id>» (clone.py → pick_tts.py, out/tts_best/).
+# Синтез закрывает пробелы и заменяет реплики, испорченные в самом фильме
+# («К вашим услугам», «Всегда к вашим услугам», «Как пожелаете»: DNSMOS ≤ 2.4).
 REPLIES: dict[str, list[str]] = {
-    "wake": ["Да сэр(второй)", "Да сэр"],
-    "ok": ["Запрос выполнен сэр"],
-    "not_understood": ["Чего вы пытаетесь добиться сэр"],
-    # Слабая (2.36), но другой реплики с этим смыслом нет.
-    "denied": ["Как пожелаете "],
-    # Нет подходящих реплик — стандартный пакет.
-    "failed": ["../default/failed_1.wav"],
-    "ask": ["../default/ask_1.wav", "../default/ask_2.wav"],
+    "wake": ["Да сэр(второй)", "tts:wake_2", "tts:wake_3", "tts:wake_4"],
+    "ok": ["Запрос выполнен сэр", "tts:ok_1"],
+    "not_understood": ["Чего вы пытаетесь добиться сэр", "tts:not_understood_1", "tts:not_understood_2"],
+    "failed": ["tts:failed_1", "tts:failed_2"],
+    "ask": ["tts:ask_1", "tts:ask_2"],
+    "denied": ["tts:denied_1", "tts:denied_2"],
 }
+TTS_BEST = ROOT / "tools" / "voice" / "out" / "tts_best"
 
 
 def main() -> None:
@@ -41,7 +41,8 @@ def main() -> None:
                 files.append(src)
                 continue
             target = f"{reply}_{i}.wav"
-            shutil.copyfile(CLEAN / f"{PREFIX}{src}.wav", PACK / target)
+            source = TTS_BEST / f"{src[4:]}.wav" if src.startswith("tts:") else CLEAN / f"{PREFIX}{src}.wav"
+            shutil.copyfile(source, PACK / target)
             files.append(target)
         lines.append(f"{reply} = [{', '.join(repr(f).replace(chr(39), chr(34)) for f in files)}]")
     (PACK / "pack.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
