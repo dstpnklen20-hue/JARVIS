@@ -20,6 +20,7 @@ import re
 import time
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 import torch
 from f5_tts.infer.utils_infer import infer_process, load_model, load_vocoder, preprocess_ref_audio_text
@@ -49,8 +50,19 @@ F5 = OUT / "f5"
 MODEL_REPO, MODEL_FILE = "ESpeech/ESpeech-TTS-1_RL-V2", "espeech_tts_rlv2.pt"
 VOCAB_REPO = "ESpeech/ESpeech-TTS-1_podcaster"
 MODEL_CFG = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-NFE_STEPS = 48
+# Больше шагов — меньше «металла» в голосе (раунд 1: 48 — «роботизированно»).
+NFE_STEPS = 64
 REFERENCE_TEXT = "Запрос выполнен, сэр."
+# Длительность фразы модель считает по образцу; с коротким эталоном (1.5 с)
+# расчёт выходил коротким и конец обрезался. Темп 0.85 — на ~18 % больше времени.
+SPEED = 0.85
+TAIL_SECS = 0.3
+
+
+def with_pauses(text: str) -> str:
+    """Небольшая пауза перед обращением: «Не удалось, сэр.» → «Не удалось, — сэр.»
+    Многоточие не годится: RUAccent его выбрасывает, а «, —» сохраняет."""
+    return re.sub(r",\s+(сэр)\b", r", — \1", text, flags=re.IGNORECASE)
 
 
 def load_stress() -> dict[str, str]:
@@ -103,9 +115,16 @@ def main() -> None:
     parser.add_argument("text", nargs="?", help="своя фраза (без неё — все фразы phrases.py)")
     parser.add_argument("--id", default="custom")
     parser.add_argument("--takes", type=int, default=3)
-    parser.add_argument("--ref", choices=["ref_short", "ref_long", "ref_dry", "all"], default="all")
+    parser.add_argument(
+        "--ref", choices=["ref_short", "ref_long", "ref_dry", "ref_clean", "ref_question", "all"], default="all"
+    )
+    parser.add_argument("--out", default="f5v2", help="папка в out/ для дублей")
+    parser.add_argument(
+        "--speed", type=float, default=SPEED, help="темп; ниже 1 — модель отводит на фразу больше времени"
+    )
     args = parser.parse_args()
     phrases = {args.id: args.text} if args.text else PHRASES
+    out_root = OUT / args.out
 
     stress = Stresser()
     refs_json = json.loads((OUT / "tts" / "references.json").read_text(encoding="utf-8"))
@@ -114,14 +133,27 @@ def main() -> None:
     import csv
 
     with open(OUT / "report.csv", encoding="utf-8-sig") as f:
-        etalon = next(r["name"] for r in csv.DictReader(f, delimiter=";") if r["file"] == "Запрос выполнен сэр")
+        real = {r["file"]: r["name"] for r in csv.DictReader(f, delimiter=";")}
+    etalon = real["Запрос выполнен сэр"]
+    question = real["Чего вы пытаетесь добиться сэр"]
     refs = {
         "ref_short": (OUT / "tts" / "ref_short.wav", REFERENCE_TEXT),
         "ref_long": (OUT / "tts" / "ref_long.wav", long_text),
         "ref_dry": (OUT / "clean" / f"{etalon}.wav", REFERENCE_TEXT),
+        # Дубль, который вы назвали самым чистым голосом (оценки 1-го раунда).
+        "ref_clean": (F5 / "failed_3" / "ref_short_3.wav", "Что-то пошло не так, сэр."),
+        # Настоящая реплика-вопрос: интонацию модель берёт из образца, а с
+        # утвердительным эталоном вопросы звучали как утверждения.
+        "ref_question": (OUT / "clean" / f"{question}.wav", "Чего вы пытаетесь добиться, сэр?"),
     }
-    if args.ref != "all":
+    if args.ref == "all":
+        # Длинный образец путает слова (разборчивость 0.38) — только по запросу.
+        refs.pop("ref_long")
+    else:
         refs = {args.ref: refs[args.ref]}
+    if args.ref == "ref_question" and not args.text:
+        # Образец-вопрос — только для вопросов.
+        phrases = {k: v for k, v in phrases.items() if v.rstrip().endswith("?")}
 
     started = time.time()
     model = load_model(
@@ -137,9 +169,11 @@ def main() -> None:
     for ref_name, (ref_wav, ref_text) in refs.items():
         ref_audio, ref_text = preprocess_ref_audio_text(str(ref_wav), stress(ref_text), show_info=lambda *_: None)
         for pid, text in phrases.items():
-            out_dir = F5 / pid
+            if ref_name == "ref_question" and not text.rstrip().endswith("?"):
+                continue  # образец-вопрос — только для вопросов
+            out_dir = out_root / pid
             out_dir.mkdir(parents=True, exist_ok=True)
-            marked = stress(text)
+            marked = stress(with_pauses(text))
             (out_dir / "text.txt").write_text(text, encoding="utf-8")
             (out_dir / "stressed.txt").write_text(marked, encoding="utf-8")
             for take in range(1, args.takes + 1):
@@ -155,10 +189,13 @@ def main() -> None:
                     model,
                     vocoder,
                     nfe_step=NFE_STEPS,
+                    speed=args.speed,
                     show_info=lambda *_: None,
                     progress=None,
                 )
                 secs = time.time() - t
+                # Запас тишины в конце: фраза не звучит оборванной.
+                wave = np.concatenate([wave, np.zeros(int(TAIL_SECS * rate), dtype=wave.dtype)])
                 sf.write(target, wave, rate)
                 timings.append((secs, len(wave) / rate))
             print(f"  {ref_name} {pid}: {marked}", flush=True)

@@ -24,8 +24,9 @@ import pyloudnorm
 import soundfile as sf
 
 from clean import TARGET_RATE, finalize
+from polish import pitch_rise, polish
 from quality import Quality
-from select_best import REFERENCE, match_loudness, similarity, words
+from select_best import REFERENCE, similarity, words
 from verify import OUT, load, recognizer, transcribe
 
 TTS = OUT / (sys.argv[1] if len(sys.argv) > 1 else "tts")
@@ -61,12 +62,17 @@ def main() -> None:
                 "timbre": float(q.embed(x) @ ref_emb),
                 "sig": sig,
                 "ovr": ovr,
+                "rise": pitch_rise(x) if text.rstrip().endswith("?") else 0.0,
             }
             takes.append(take)
             by_ref[take["ref"]].append(take)
         best_words = max(t["words"] for t in takes)
         intact = [t for t in takes if t["words"] >= max(best_words - 0.05, MIN_WORDS)] or takes
-        chosen = max(intact, key=lambda t: t["timbre"] + 0.15 * t["ovr"])
+        # Вопрос — подъём тона к концу (раунд 1: «мало выражена вопросительная интонация»).
+        chosen = max(
+            intact,
+            key=lambda t: t["timbre"] + 0.15 * t["ovr"] + 0.1 * float(np.clip(t["rise"] / 4, -1, 1)),
+        )
         finalize(chosen["path"], BEST / f"{phrase_dir.name}.wav")
         rows.append(
             {
@@ -77,6 +83,7 @@ def main() -> None:
                 "OVRL": round(chosen["ovr"], 2),
                 "SIG": round(chosen["sig"], 2),
                 "words": round(chosen["words"], 2),
+                "rise": round(chosen["rise"], 1),
                 "heard": chosen["heard"],
             }
         )
@@ -88,7 +95,7 @@ def main() -> None:
     meter = pyloudnorm.Meter(TARGET_RATE, block_size=0.2)
     target = meter.integrated_loudness(sf.read(ref_path, dtype="float32")[0])
     for r in rows:
-        match_loudness(BEST / f"{r['id']}.wav", target)
+        polish(BEST / f"{r['id']}.wav", target)
     with open(OUT / f"{TTS.name}_report.csv", "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter=";")
         writer.writeheader()
