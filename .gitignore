@@ -26,3 +26,4 @@ __pycache__/
 
 # Звуковые пакеты с чужими голосами — только для личного использования
 /sounds/jarvis/
+/tools/voice/.venv-enhance/
