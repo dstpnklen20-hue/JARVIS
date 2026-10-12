@@ -41,6 +41,16 @@ struct Cli {
     #[arg(long)]
     enroll: bool,
 
+    /// Сколько раз сказать «Джарвис» при --enroll (3–20): больше попыток с
+    /// разных расстояний и разной громкостью — увереннее узнавание.
+    #[arg(long, value_name = "N", default_value_t = enroll::SAMPLES, requires = "enroll",
+          value_parser = clap::value_parser!(u8).range(3..=20))]
+    samples: u8,
+
+    /// Сохранить попытки --enroll в data/enroll/ (для разбора, по умолчанию звук не пишется).
+    #[arg(long, requires = "enroll")]
+    save_samples: bool,
+
     /// Записать образец голоса из WAV-файлов (по одному «Джарвис» в файле).
     #[arg(long, value_name = "WAV", num_args = 3..)]
     enroll_from: Option<Vec<PathBuf>>,
@@ -111,7 +121,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         return bench::run(&root, &config, files);
     }
     if cli.enroll {
-        return enroll::run_microphone(&root, &config);
+        return enroll::run_microphone(&root, &config, usize::from(cli.samples), cli.save_samples);
     }
     if let Some(files) = &cli.enroll_from {
         return enroll::run_files(&root, &config, files);
