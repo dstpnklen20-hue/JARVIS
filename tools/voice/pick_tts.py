@@ -7,13 +7,16 @@ DNSMOS (quality.py), разборчивость (распознавание пр
 на эталон, качество — при прочих равных. Для сравнения печатается, насколько
 похожи на эталон настоящие реплики Джарвиса из фильма.
 
-Итог — out/tts_best/<id>.wav (громкость как у эталона), отчёт — out/tts_report.csv.
-Запуск: tools\\voice\\.venv\\Scripts\\python.exe tools\\voice\\pick_tts.py
+Источник — out/tts (Chatterbox, clone.py) или out/f5 (ESpeech, clone_f5.py).
+Итог — out/<источник>_best/<id>.wav (громкость как у эталона), отчёт —
+out/<источник>_report.csv.
+Запуск: tools\\voice\\.venv\\Scripts\\python.exe tools\\voice\\pick_tts.py [tts | f5]
 """
 
 from __future__ import annotations
 
 import csv
+import sys
 from collections import defaultdict
 
 import numpy as np
@@ -25,8 +28,8 @@ from quality import Quality
 from select_best import REFERENCE, match_loudness, similarity, words
 from verify import OUT, load, recognizer, transcribe
 
-TTS = OUT / "tts"
-BEST = OUT / "tts_best"
+TTS = OUT / (sys.argv[1] if len(sys.argv) > 1 else "tts")
+BEST = OUT / f"{TTS.name}_best"
 MIN_WORDS = 0.8
 
 
@@ -86,7 +89,7 @@ def main() -> None:
     target = meter.integrated_loudness(sf.read(ref_path, dtype="float32")[0])
     for r in rows:
         match_loudness(BEST / f"{r['id']}.wav", target)
-    with open(OUT / "tts_report.csv", "w", newline="", encoding="utf-8-sig") as f:
+    with open(OUT / f"{TTS.name}_report.csv", "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter=";")
         writer.writeheader()
         writer.writerows(rows)

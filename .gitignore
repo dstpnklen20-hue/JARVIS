@@ -30,3 +30,4 @@ __pycache__/
 # Модели ClearerVoice (качаются в checkpoints/ рядом с местом запуска)
 /checkpoints/
 /tools/voice/.venv-tts/
+/tools/voice/.venv-f5/
