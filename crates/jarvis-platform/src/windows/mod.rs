@@ -1,12 +1,14 @@
 //! Реализация для Windows через `windows-sys`.
 
 mod actions;
+mod autostart;
 mod browser;
 mod dialog;
 mod event_loop;
 mod hotkey;
 mod instance;
 mod keys;
+mod paths;
 mod power;
 mod process;
 mod stop;
@@ -14,6 +16,7 @@ mod system;
 mod text_window;
 
 pub use actions::{MediaKey, media_key, open_url};
+pub use autostart::{autostart_command, set_autostart};
 pub use browser::{activate_browser_tab, focus_app, focus_browser, process_running};
 pub use dialog::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 pub use event_loop::{
@@ -23,6 +26,7 @@ pub use event_loop::{
 pub use hotkey::{HotkeyGuard, parse_hotkey, register_hotkey};
 pub use instance::acquire_single_instance;
 pub use keys::{press_keys, release_all_keys};
+pub use paths::short_path;
 pub use power::{Power, power, set_volume};
 pub use process::{RunEnd, run_and_wait, spawn_detached};
 pub use stop::{StopSignal, create_stop_signal, send_stop_signal};

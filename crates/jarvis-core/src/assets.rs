@@ -44,6 +44,10 @@ pub struct Asset {
     pub dir: String,
     /// Обязателен ли ресурс для работы (необязательные качаются по флагу).
     pub required: bool,
+    /// Нужен только для сборки (библиотека, которая вшивается в exe):
+    /// в установленной программе его нет — и это не ошибка.
+    #[serde(default)]
+    pub build_only: bool,
     /// Файлы, наличие которых проверяет `--check` (пути внутри `dir`).
     pub files: Vec<String>,
 }
@@ -176,6 +180,7 @@ mod tests {
             base: AssetBase::Models,
             dir: "a".into(),
             required: true,
+            build_only: false,
             files: vec!["conf/model.conf".into()],
         }
     }

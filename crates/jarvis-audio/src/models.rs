@@ -114,5 +114,21 @@ pub fn installed_voices(root: &Path, config: &Config) -> Vec<String> {
 
 /// sherpa-onnx принимает пути строками.
 pub(crate) fn path_str(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    let text = path.to_string_lossy().into_owned();
+    if text.is_ascii() {
+        return text;
+    }
+    // Нативные библиотеки (espeak-ng) не открывают пути с русскими буквами —
+    // короткое имя 8.3 латинское. Если короткие имена на томе выключены —
+    // путь остаётся прежним (и `jarvis --check` об этом предупредит).
+    #[cfg(windows)]
+    {
+        let short = jarvis_platform::short_path(path)
+            .to_string_lossy()
+            .into_owned();
+        if short.is_ascii() {
+            return short;
+        }
+    }
+    text
 }

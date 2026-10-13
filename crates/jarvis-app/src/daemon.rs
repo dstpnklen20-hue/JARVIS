@@ -90,7 +90,7 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
             }
         })
         .context("не удалось запустить поток остановки")?;
-    let mut tray = Tray::new()?;
+    let mut tray = Tray::new(autostart::enabled())?;
 
     // Горячая клавиша аварийной остановки — в этом (главном) потоке.
     let _hotkey = match config.hotkeys.emergency_stop.trim() {
@@ -166,6 +166,7 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
             Some(MenuAction::ReloadCommands) => {
                 let _ = core_tx.send(CoreMsg::ReloadCommands);
             }
+            Some(MenuAction::ToggleAutostart) => tray.set_autostart(autostart::toggle()),
             Some(MenuAction::Quit) => return ControlFlow::Break(()),
             None => {}
         }
@@ -230,5 +231,39 @@ pub fn check_hotkey(config: &Config) -> Result<Option<String>, String> {
     match config.hotkeys.emergency_stop.trim() {
         "" => Ok(None),
         spec => jarvis_platform::parse_hotkey(spec).map(|_| Some(spec.to_owned())),
+    }
+}
+
+/// Автозапуск при входе в Windows: `jarvisw.exe` рядом с `jarvis.exe`
+/// (без окна консоли).
+mod autostart {
+    const NAME: &str = "Jarvis";
+
+    pub fn enabled() -> bool {
+        jarvis_platform::autostart_command(NAME).is_ok_and(|c| c.is_some())
+    }
+
+    /// Переключить; вернуть, включён ли автозапуск теперь.
+    pub fn toggle() -> bool {
+        let result = if enabled() {
+            jarvis_platform::set_autostart(NAME, None)
+        } else {
+            match std::env::current_exe() {
+                Ok(exe) => {
+                    let command = format!("\"{}\"", exe.with_file_name("jarvisw.exe").display());
+                    jarvis_platform::set_autostart(NAME, Some(&command))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "не найден путь программы");
+                    return enabled();
+                }
+            }
+        };
+        if let Err(e) = result {
+            tracing::error!(error = %e, "не удалось изменить автозапуск");
+        }
+        let now = enabled();
+        tracing::info!(on = now, "автозапуск при входе в Windows");
+        now
     }
 }

@@ -170,6 +170,10 @@ fn check_asset(asset: &Asset, root: &Path, config: &Config) -> Item {
     let what = &asset.description;
     let (status, detail) = match asset.status(&location) {
         AssetStatus::Ok => (Status::Ok, format!("{shown} — {what}")),
+        AssetStatus::Missing if asset.build_only => (
+            Status::Skip,
+            format!("нет — нужно только для сборки ({what})"),
+        ),
         AssetStatus::Missing if !asset.required => (
             Status::Skip,
             format!("не скачано — {what}; необязательно ({DOWNLOAD_HINT} -Full)"),

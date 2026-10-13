@@ -15,4 +15,5 @@ timeout /t 1 /nobreak >nul
 set /a waited+=1
 goto wait
 :start
-start "Jarvis" /min target\release\jarvis.exe
+rem jarvisw.exe starts jarvis.exe without a console window.
+start "" target\release\jarvisw.exe

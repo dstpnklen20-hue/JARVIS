@@ -28,6 +28,14 @@ pub use windows::{HotkeyGuard, parse_hotkey, register_hotkey};
 #[cfg(windows)]
 pub use windows::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 
+/// Автозапуск при входе в Windows (HKCU\...\Run).
+#[cfg(windows)]
+pub use windows::{autostart_command, set_autostart};
+
+/// Короткое (латинское) имя пути для нативных библиотек.
+#[cfg(windows)]
+pub use windows::short_path;
+
 /// Окно с текстом ответа нейросети.
 #[cfg(windows)]
 pub use windows::{TextWindow, show_text_window};

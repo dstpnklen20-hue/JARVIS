@@ -55,6 +55,7 @@ pub enum MenuAction {
     TogglePause,
     ForgetPermissions,
     ReloadCommands,
+    ToggleAutostart,
     Quit,
 }
 
@@ -63,13 +64,17 @@ pub struct Tray {
     pause: CheckMenuItem,
     forget: MenuItem,
     reload: MenuItem,
+    autostart: CheckMenuItem,
     quit: MenuItem,
     shown: Indicator,
 }
 
 impl Tray {
-    pub fn new() -> anyhow::Result<Self> {
+    /// `autostart` — включён ли сейчас запуск при входе в Windows.
+    pub fn new(autostart_on: bool) -> anyhow::Result<Self> {
         let pause = CheckMenuItem::new("Пауза", true, false, None);
+        let autostart =
+            CheckMenuItem::new("Запускать при входе в Windows", true, autostart_on, None);
         let reload = MenuItem::new("Обновить команды", true, None);
         let forget = MenuItem::new("Забыть разрешения", true, None);
         let quit = MenuItem::new("Выход", true, None);
@@ -78,6 +83,7 @@ impl Tray {
             &pause,
             &reload,
             &forget,
+            &autostart,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -94,6 +100,7 @@ impl Tray {
             pause,
             reload,
             forget,
+            autostart,
             quit,
             shown,
         })
@@ -115,6 +122,11 @@ impl Tray {
         self.shown = indicator;
     }
 
+    /// Показать состояние автозапуска (после переключения или ошибки).
+    pub fn set_autostart(&self, on: bool) {
+        self.autostart.set_checked(on);
+    }
+
     /// Следующее действие из меню, если пользователь что-то выбрал.
     pub fn poll_menu(&self) -> Option<MenuAction> {
         let event = MenuEvent::receiver().try_recv().ok()?;
@@ -124,6 +136,8 @@ impl Tray {
             Some(MenuAction::ReloadCommands)
         } else if event.id == *self.forget.id() {
             Some(MenuAction::ForgetPermissions)
+        } else if event.id == *self.autostart.id() {
+            Some(MenuAction::ToggleAutostart)
         } else if event.id == *self.quit.id() {
             Some(MenuAction::Quit)
         } else {
