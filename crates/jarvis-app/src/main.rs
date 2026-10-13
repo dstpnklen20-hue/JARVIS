@@ -22,7 +22,7 @@ use jarvis_core::{Config, logging, root};
     name = "jarvis",
     version,
     about = "Джарвис — голосовой ассистент для ПК",
-    group(ArgGroup::new("mode").args(["check", "stop", "bench", "enroll", "enroll_from", "record", "say"]))
+    group(ArgGroup::new("mode").args(["check", "stop", "bench", "enroll", "voice_test", "enroll_from", "record", "say"]))
 )]
 struct Cli {
     /// Проверить окружение, конфиг и модели, напечатать отчёт и выйти.
@@ -41,14 +41,18 @@ struct Cli {
     #[arg(long)]
     enroll: bool,
 
-    /// Сколько раз сказать «Джарвис» при --enroll (3–20): больше попыток с
-    /// разных расстояний и разной громкостью — увереннее узнавание.
-    #[arg(long, value_name = "N", default_value_t = enroll::SAMPLES, requires = "enroll",
-          value_parser = clap::value_parser!(u8).range(3..=20))]
-    samples: u8,
+    /// Проверить, узнаёт ли Джарвис ваш голос: несколько раз «Джарвис» как обычно,
+    /// таблица по каждой попытке. Сохранённый образец голоса не меняется.
+    #[arg(long)]
+    voice_test: bool,
 
-    /// Сохранить попытки --enroll в data/enroll/ (для разбора, по умолчанию звук не пишется).
-    #[arg(long, requires = "enroll")]
+    /// Сколько раз сказать «Джарвис» при --enroll (3–20, по умолчанию 5: больше
+    /// попыток с разных расстояний — увереннее узнавание) или --voice-test (по умолчанию 10).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(3..=20))]
+    samples: Option<u8>,
+
+    /// Сохранить попытки --enroll / --voice-test в data/enroll/ (для разбора, по умолчанию звук не пишется).
+    #[arg(long)]
     save_samples: bool,
 
     /// Записать образец голоса из WAV-файлов (по одному «Джарвис» в файле).
@@ -120,8 +124,14 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Some(files) = &cli.bench {
         return bench::run(&root, &config, files);
     }
-    if cli.enroll {
-        return enroll::run_microphone(&root, &config, usize::from(cli.samples), cli.save_samples);
+    if cli.enroll || cli.voice_test {
+        let (mode, default) = if cli.enroll {
+            (enroll::Mode::Enroll, enroll::SAMPLES)
+        } else {
+            (enroll::Mode::Test, enroll::TEST_SAMPLES)
+        };
+        let count = usize::from(cli.samples.unwrap_or(default));
+        return enroll::run_microphone(&root, &config, count, cli.save_samples, mode);
     }
     if let Some(files) = &cli.enroll_from {
         return enroll::run_files(&root, &config, files);

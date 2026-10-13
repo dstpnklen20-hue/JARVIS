@@ -6,6 +6,9 @@
 //! он слышит именно этот голос), модель говорящего считает вектор голоса.
 //! Итог — `data/voiceprint.json` и таблица: на каких попытках настоящий
 //! детектор «Джарвис» сработал бы без подсказок.
+//!
+//! `jarvis --voice-test`: те же попытки, но только проверка — сохранённый
+//! образец голоса не меняется; в таблице — узнал бы Джарвис ваш голос.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,10 @@ use jarvis_core::Config;
 use crate::hearing::data_dir;
 
 pub const SAMPLES: u8 = 5;
+/// Попыток в проверке по умолчанию.
+pub const TEST_SAMPLES: u8 = 10;
+/// Подсказка проверки: всегда одинаково — как вы обычно говорите.
+const PLAIN_HINT: &str = "обычным голосом, как обычно";
 /// Времени на одну попытку (с учётом пауз и переходов по комнате).
 const TIME_PER_SAMPLE: Duration = Duration::from_secs(20);
 /// Подсказки по порядку попыток: разные расстояния и громкость, чтобы образец
@@ -63,6 +70,8 @@ struct Enroller {
     embeddings: Vec<Vec<f32>>,
     heard: Vec<String>,
     attempts: Vec<Attempt>,
+    /// Проверка: с чем сравнивать голос (сохранённый образец).
+    reference: Option<Voiceprint>,
 }
 
 /// Принятая попытка — для итоговой таблицы.
@@ -72,6 +81,8 @@ struct Attempt {
     rms_db: f32,
     /// Сработал бы детектор «Джарвис» без подстройки громкости.
     live: bool,
+    /// Проверка: сходство с образцом голоса (как его считает работающий Джарвис).
+    voice: Option<f32>,
     samples: Vec<f32>,
 }
 
@@ -86,6 +97,7 @@ impl Enroller {
             embeddings: Vec::new(),
             heard: Vec::new(),
             attempts: Vec::new(),
+            reference: None,
         })
     }
 
@@ -119,6 +131,12 @@ impl Enroller {
             .encoder
             .embed(samples)
             .ok_or_else(|| "слишком коротко для распознавания голоса".to_owned())?;
+        // Работающий Джарвис сравнивает голос по записи как есть, без выравнивания.
+        let voice = self.reference.as_ref().map(|print| {
+            self.encoder
+                .embed(&samples_raw)
+                .map_or(0.0, |e| print.similarity(&e))
+        });
         self.embeddings.push(embedding);
         self.heard.push(word.clone());
         self.attempts.push(Attempt {
@@ -126,6 +144,7 @@ impl Enroller {
             peak_db,
             rms_db,
             live,
+            voice,
             samples: samples_raw,
         });
         Ok(word)
@@ -135,17 +154,53 @@ impl Enroller {
     fn report(&self) {
         println!();
         println!(
-            "{:>3}  {:<46} {:>8} {:>9}  сработал бы",
-            "№", "как говорили", "пик, дБ", "средн., дБ"
+            "{:>3}  {:<46} {:>8} {:>9}  сработал бы{}",
+            "№",
+            "как говорили",
+            "пик, дБ",
+            "средн., дБ",
+            if self.reference.is_some() {
+                "  голос узнан (сходство)"
+            } else {
+                ""
+            }
         );
         for (i, a) in self.attempts.iter().enumerate() {
+            let voice = match (a.voice, &self.reference) {
+                (Some(s), Some(print)) => format!(
+                    "  {:<11} ({s:.2})",
+                    if s >= print.threshold {
+                        "да"
+                    } else {
+                        "НЕТ"
+                    }
+                ),
+                _ => String::new(),
+            };
             println!(
-                "{:>3}  {:<46} {:>8.0} {:>9.0}  {}",
+                "{:>3}  {:<46} {:>8.0} {:>9.0}  {:<11}{voice}",
                 i + 1,
                 a.hint,
                 a.peak_db,
                 a.rms_db,
                 if a.live { "да" } else { "НЕТ" }
+            );
+        }
+        if let Some(print) = &self.reference {
+            let known = self
+                .attempts
+                .iter()
+                .filter(|a| a.voice.is_some_and(|s| s >= print.threshold))
+                .count();
+            let both = self
+                .attempts
+                .iter()
+                .filter(|a| a.live && a.voice.is_some_and(|s| s >= print.threshold))
+                .count();
+            println!(
+                "Голос узнан: {known} из {n} (порог {:.2}). Джарвис ответил бы: {both} из {n}.",
+                print.threshold,
+                n = self.attempts.len()
             );
         }
         let missed: Vec<&Attempt> = self.attempts.iter().filter(|a| !a.live).collect();
@@ -226,6 +281,15 @@ impl Enroller {
     }
 }
 
+/// Что делать с попытками.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Записать новый образец голоса (подсказки — разные расстояния и громкость).
+    Enroll,
+    /// Только проверить: узнаёт ли Джарвис голос; образец не меняется.
+    Test,
+}
+
 /// Запись с микрофона: `count` попыток; `save_samples` — сохранить их в
 /// `data/enroll/<время>/` (по умолчанию звук на диск не пишется).
 pub fn run_microphone(
@@ -233,12 +297,20 @@ pub fn run_microphone(
     config: &Config,
     count: usize,
     save_samples: bool,
+    mode: Mode,
 ) -> anyhow::Result<()> {
     // Работающий Джарвис отвечал бы на каждое «Джарвис» и мешал записи.
     let _instance = jarvis_platform::acquire_single_instance(crate::daemon::INSTANCE_NAME)?
         .context("сначала остановите Джарвиса: jarvis --stop")?;
     let models = SpeechModels::locate(root, config)?;
     let mut enroller = Enroller::new(&models, config)?;
+    if mode == Mode::Test {
+        enroller.reference = Some(
+            Voiceprint::load(&data_dir(root, config), &models.speaker)?
+                .context("образца голоса ещё нет — сначала запишите его: jarvis --enroll")?,
+        );
+    }
+    let plain = mode == Mode::Test;
     let mut vad = Vad::new(
         &models.vad,
         VadSettings {
@@ -250,12 +322,22 @@ pub fn run_microphone(
         Capture::open(config.audio.input_device_name()).context("микрофон не открылся")?;
     let mut resampler = StreamResampler::new(capture.sample_rate(), MODEL_RATE)?;
 
-    println!("Запись образца голоса. Микрофон: {}", capture.device_name());
-    println!(
-        "Скажите «Джарвис» {count} раз — так, как подсказывает каждая строка (расстояние и громкость). \
-         После каждого раза — пауза в секунду; на переход по комнате времени хватит."
-    );
-    prompt(0, count);
+    if plain {
+        println!(
+            "Проверка голоса (образец не меняется). Микрофон: {}",
+            capture.device_name()
+        );
+        println!(
+            "Скажите «Джарвис» {count} раз — как обычно, с обычного места. После каждого раза — пауза в секунду."
+        );
+    } else {
+        println!("Запись образца голоса. Микрофон: {}", capture.device_name());
+        println!(
+            "Скажите «Джарвис» {count} раз — так, как подсказывает каждая строка (расстояние и громкость). \
+             После каждого раза — пауза в секунду; на переход по комнате времени хватит."
+        );
+    }
+    prompt(0, count, plain);
 
     let started = Instant::now();
     let timeout = TIME_PER_SAMPLE * count as u32;
@@ -276,7 +358,7 @@ pub fn run_microphone(
         chunk16.clear();
         resampler.process(&raw[..n], |out| chunk16.extend_from_slice(out))?;
         for segment in vad.accept(&chunk16) {
-            let hint = hint(enroller.embeddings.len());
+            let hint = hint(enroller.embeddings.len(), plain);
             match enroller.offer(&segment, hint) {
                 Ok(word) => {
                     let live = enroller.attempts.last().is_some_and(|a| a.live);
@@ -289,12 +371,12 @@ pub fn run_microphone(
                         }
                     );
                     if enroller.embeddings.len() < count {
-                        prompt(enroller.embeddings.len(), count);
+                        prompt(enroller.embeddings.len(), count, plain);
                     }
                 }
                 Err(why) => {
                     println!("✗ {why}. Ещё раз.");
-                    prompt(enroller.embeddings.len(), count);
+                    prompt(enroller.embeddings.len(), count, plain);
                 }
             }
         }
@@ -306,7 +388,13 @@ pub fn run_microphone(
         let stamp: String = stamp.chars().take(19).collect();
         enroller.save_samples(&data_dir(root, config).join("enroll").join(stamp))?;
     }
-    save(enroller.finish(&models, config)?, root, config)
+    match mode {
+        Mode::Enroll => save(enroller.finish(&models, config)?, root, config),
+        Mode::Test => {
+            println!("Образец голоса не менялся.");
+            Ok(())
+        }
+    }
 }
 
 /// Образцы из WAV-файлов (по одной попытке в файле) — для проверки без микрофона.
@@ -337,12 +425,16 @@ fn save(print: Voiceprint, root: &Path, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn hint(index: usize) -> &'static str {
-    HINTS[index % HINTS.len()]
+fn hint(index: usize, plain: bool) -> &'static str {
+    if plain {
+        PLAIN_HINT
+    } else {
+        HINTS[index % HINTS.len()]
+    }
 }
 
-fn prompt(done: usize, count: usize) {
-    print!("[{}/{count}] «Джарвис» — {}… ", done + 1, hint(done));
+fn prompt(done: usize, count: usize, plain: bool) {
+    print!("[{}/{count}] «Джарвис» — {}… ", done + 1, hint(done, plain));
     let _ = std::io::stdout().flush();
 }
 
