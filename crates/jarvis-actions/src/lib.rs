@@ -24,6 +24,9 @@ pub const DEFAULT_KEY_HOLD_MS: u64 = 30;
 pub const DEFAULT_KEY_INTERVAL_MS: u64 = 50;
 /// Как часто проверять, запустился ли процесс (`wait_process`).
 pub const PROCESS_POLL: Duration = Duration::from_millis(500);
+/// Через сколько после открытия адреса выводить браузер вперёд: браузер
+/// успевает принять адрес и открыть вкладку.
+pub const BROWSER_FOCUS_DELAY: Duration = Duration::from_millis(300);
 
 /// Флаг отмены действия; клонируется и передаётся между потоками.
 #[derive(Debug, Clone, Default)]
@@ -102,6 +105,9 @@ pub trait System: Send + Sync {
     /// Найти открытую вкладку браузера, заголовок которой подходит, сделать её
     /// текущей и вывести окно вперёд. `Ok(None)` — такой вкладки нет.
     fn activate_tab(&self, matches: &dyn Fn(&str) -> bool) -> Result<Option<String>, String>;
+    /// Вывести окно браузера вперёд (после открытия новой вкладки);
+    /// `false` — браузер не найден или Windows не дала сменить окно.
+    fn focus_browser(&self) -> bool;
     /// Запущен ли процесс с таким именем файла (`steam.exe`), без учёта регистра.
     fn process_running(&self, name: &str) -> Result<bool, String>;
 }
@@ -209,6 +215,11 @@ pub fn execute(action: &ActionSpec, ctx: &Context<'_>) -> Result<Outcome, Action
                 }
             }
             ctx.system.open_url(url).map_err(ActionError::OpenUrl)?;
+            // Новая вкладка открывается в окне браузера, но Windows не выводит
+            // его вперёд сама — делаем это (не вышло — не ошибка команды).
+            if ctx.cancel.sleep(BROWSER_FOCUS_DELAY) && !ctx.system.focus_browser() {
+                tracing::debug!("браузер не вышел вперёд");
+            }
             Ok(Outcome::Done)
         }
         ActionSpec::Media {
@@ -472,6 +483,10 @@ mod tests {
             self.log(format!("tab {found:?}"))?;
             Ok(found)
         }
+        fn focus_browser(&self) -> bool {
+            let _ = self.log("focus browser".into());
+            true
+        }
         fn process_running(&self, name: &str) -> Result<bool, String> {
             let mut checks = self.checks.lock().unwrap();
             *checks += 1;
@@ -517,7 +532,10 @@ mod tests {
             find_tab: Vec::new(),
         };
         assert!(matches!(run(&bad, &fake), Err(ActionError::Invalid(_))));
-        assert_eq!(calls(&fake), ["open https://www.youtube.com"]);
+        assert_eq!(
+            calls(&fake),
+            ["open https://www.youtube.com", "focus browser"]
+        );
     }
 
     #[test]
@@ -701,7 +719,10 @@ mod tests {
             ],
         };
         assert_eq!(run(&seq, &fake), Ok(Outcome::Done));
-        assert_eq!(calls(&fake), ["keys [91, 68] 30ms", "open https://ya.ru"]);
+        assert_eq!(
+            calls(&fake),
+            ["keys [91, 68] 30ms", "open https://ya.ru", "focus browser"]
+        );
 
         let failing = Fake {
             fail: true,
@@ -801,11 +822,17 @@ mod tests {
             run(&youtube(&["* - YouTube", "YouTube"]), &fake),
             Ok(Outcome::Done)
         );
-        assert_eq!(calls(&fake), ["tab None", "open https://www.youtube.com"]);
+        assert_eq!(
+            calls(&fake),
+            ["tab None", "open https://www.youtube.com", "focus browser"]
+        );
         // Без find_tab вкладки не ищутся.
         let plain = Fake::default();
         run(&youtube(&[]), &plain).unwrap();
-        assert_eq!(calls(&plain), ["open https://www.youtube.com"]);
+        assert_eq!(
+            calls(&plain),
+            ["open https://www.youtube.com", "focus browser"]
+        );
     }
 
     #[test]

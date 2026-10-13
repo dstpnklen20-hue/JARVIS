@@ -18,6 +18,11 @@
 //! понял фразу — выполняет; услышал, но не понял — «Не понял, сэр» и ждёт
 //! повтора; ничего не услышал — «Не расслышал, сэр» и возвращается в IDLE.
 //!
+//! Режим диалога (CONVERSATION): команды без «Джарвис», пока его не выключат
+//! или `session.dialog_idle_mins` не прозвучит ни одной команды; непонятные
+//! фразы — молча (это может быть разговор рядом). После команды, отказа или
+//! тишины на вопрос автомат возвращается в CONVERSATION, а не в FOLLOW_UP/IDLE.
+//!
 //! Аварийная остановка горячей клавишей из любого состояния → PAUSED
 //! (микрофон выключен, вернуть — пункт «Пауза» в трее). «Джарвис, стоп»
 //! голосом останавливает то же самое, но микрофон не выключает → IDLE:
@@ -40,12 +45,17 @@ pub enum State {
     FollowUp { until: Instant },
     /// Спросили разрешение, ждём ответа до `until` (тишина — отказ).
     AskingPermission { until: Instant },
+    /// Режим диалога: команды без «Джарвис»; без команд до `until` — выход.
+    Conversation { until: Instant },
 }
 
 impl State {
     /// Принимаются ли сейчас команды без слова активации.
     pub fn accepts_commands(&self) -> bool {
-        matches!(self, State::Listening { .. } | State::FollowUp { .. })
+        matches!(
+            self,
+            State::Listening { .. } | State::FollowUp { .. } | State::Conversation { .. }
+        )
     }
 }
 
@@ -69,6 +79,10 @@ pub enum Event {
     NotUnderstood,
     /// Команда узнана, но число в ней вне допустимого диапазона.
     InvalidValue,
+    /// «Режим диалога» — ядро уже включило `Timings::dialog`.
+    DialogStart,
+    /// «Выйди из режима диалога».
+    DialogEnd,
     /// Команда задала вопрос (`ask`) — ждать ответ, как команду после «Джарвис».
     Asked,
     /// Команда выполнена; `reply` — что сказать (уже выбрано ядром:
@@ -197,6 +211,9 @@ pub struct Timings {
     pub follow_up: Duration,
     /// Сколько ждать ответа на вопрос-разрешение (раздел 2.1: 10 секунд).
     pub ask: Duration,
+    /// Режим диалога включён: сколько ждать команду, прежде чем выйти из него.
+    /// `None` — режим выключен.
+    pub dialog: Option<Duration>,
 }
 
 pub fn transition(state: State, event: Event, now: Instant, timings: Timings) -> Transition {
@@ -206,6 +223,13 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
     let listening = |retry| S::Listening {
         until: now + timings.listen,
         retry,
+    };
+    // Куда вернуться после команды: в режиме диалога — снова в диалог.
+    let after_command = || match timings.dialog {
+        Some(idle) => S::Conversation { until: now + idle },
+        None => S::FollowUp {
+            until: now + timings.follow_up,
+        },
     };
 
     // Уходя из вопроса-разрешения, окно надо убрать.
@@ -259,6 +283,9 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
             retry,
         }),
         (S::FollowUp { until }, E::Spoke(d)) => Transition::stay(S::FollowUp { until: until + d }),
+        (S::Conversation { until }, E::Spoke(d)) => {
+            Transition::stay(S::Conversation { until: until + d })
+        }
         (_, E::Spoke(_)) => Transition::stay(state),
         // Человек ещё говорит — не обрывать фразу на середине по таймеру.
         (S::Listening { until, retry }, E::UserSpeaking) => Transition::stay(S::Listening {
@@ -271,7 +298,10 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         (_, E::UserSpeaking) => Transition::stay(state),
 
         // --- вопрос-разрешение ---
-        (S::Listening { .. } | S::FollowUp { .. }, E::NeedPermission(id)) => Transition::to(
+        (
+            S::Listening { .. } | S::FollowUp { .. } | S::Conversation { .. },
+            E::NeedPermission(id),
+        ) => Transition::to(
             S::AskingPermission {
                 until: now + timings.ask,
             },
@@ -281,20 +311,53 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
             Transition::to(S::Executing, vec![Effect::CloseAsk, Effect::Execute(id)])
         }
         (S::AskingPermission { .. }, E::PermissionDenied) => Transition::to(
-            S::FollowUp {
-                until: now + timings.follow_up,
-            },
+            after_command(),
             vec![Effect::CloseAsk, Effect::PlayReply(Reply::Denied)],
         ),
         // Тишина 10 секунд — не выполнять (раздел 2.1).
-        (S::AskingPermission { until }, E::Tick) if now >= until => Transition::to(
-            S::Idle,
-            vec![Effect::CloseAsk, Effect::SetTranscribing(false)],
-        ),
+        (S::AskingPermission { until }, E::Tick) if now >= until => match timings.dialog {
+            Some(idle) => Transition::to(
+                S::Conversation { until: now + idle },
+                vec![Effect::CloseAsk],
+            ),
+            None => Transition::to(
+                S::Idle,
+                vec![Effect::CloseAsk, Effect::SetTranscribing(false)],
+            ),
+        },
         // Пока ждём ответа, всё остальное не отвлекает.
         (S::AskingPermission { .. }, _) => Transition::stay(state),
         (_, E::NeedPermission(_) | E::PermissionGranted(_) | E::PermissionDenied) => {
             Transition::stay(state)
+        }
+
+        // --- режим диалога ---
+        (
+            S::Idle | S::Listening { .. } | S::FollowUp { .. } | S::Conversation { .. },
+            E::DialogStart,
+        ) => match timings.dialog {
+            Some(idle) => Transition::to(
+                S::Conversation { until: now + idle },
+                vec![
+                    Effect::SetTranscribing(true),
+                    Effect::PlayReply(Reply::Wake),
+                ],
+            ),
+            None => Transition::stay(state),
+        },
+        (S::Listening { .. } | S::FollowUp { .. } | S::Conversation { .. }, E::DialogEnd) => {
+            Transition::to(
+                S::Idle,
+                vec![
+                    Effect::SetTranscribing(false),
+                    Effect::PlayReply(Reply::Done),
+                ],
+            )
+        }
+        (_, E::DialogStart | E::DialogEnd) => Transition::stay(state),
+        // «Джарвис» в диалоге — ответить и ждать команду, как обычно.
+        (S::Conversation { .. }, E::WakeWord) => {
+            Transition::to(listening(false), vec![Effect::PlayReply(Reply::Wake)])
         }
 
         // --- слово активации ---
@@ -309,7 +372,7 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         (S::Executing, E::WakeWord) => Transition::stay(S::Executing),
 
         // --- команды ---
-        (S::Listening { .. } | S::FollowUp { .. }, E::Command(id)) => {
+        (S::Listening { .. } | S::FollowUp { .. } | S::Conversation { .. }, E::Command(id)) => {
             Transition::to(S::Executing, vec![Effect::Execute(id)])
         }
         // После «Джарвис» непонятная фраза — переспросить; в FOLLOW_UP это
@@ -318,10 +381,13 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
             listening(true),
             vec![Effect::PlayReply(Reply::NotUnderstood)],
         ),
-        (S::FollowUp { .. } | S::Idle | S::Executing, E::NotUnderstood) => Transition::stay(state),
+        (
+            S::FollowUp { .. } | S::Conversation { .. } | S::Idle | S::Executing,
+            E::NotUnderstood,
+        ) => Transition::stay(state),
         // Команда узнана уверенно (и в FOLLOW_UP тоже), но значение недопустимо —
         // сказать об этом и ждать исправленную фразу.
-        (S::Listening { .. } | S::FollowUp { .. }, E::InvalidValue) => {
+        (S::Listening { .. } | S::FollowUp { .. } | S::Conversation { .. }, E::InvalidValue) => {
             Transition::to(listening(true), vec![Effect::PlayReply(Reply::OutOfRange)])
         }
         (S::Idle | S::Executing, E::InvalidValue) => Transition::stay(state),
@@ -335,9 +401,7 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
 
         // --- окончание команды ---
         (S::Executing, E::ActionFinished { reply }) => Transition::to(
-            S::FollowUp {
-                until: now + timings.follow_up,
-            },
+            after_command(),
             reply.map(Effect::PlayReply).into_iter().collect(),
         ),
         (_, E::ActionFinished { .. }) => Transition::stay(state),
@@ -345,11 +409,25 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         // --- таймауты ---
         // После «Джарвис» ничего не прозвучало — сказать об этом.
         (S::Listening { until, retry }, E::Tick) if now >= until => {
-            let mut effects = vec![Effect::SetTranscribing(false)];
-            if !retry {
-                effects.insert(0, Effect::PlayReply(Reply::NotHeard));
+            let not_heard = (!retry).then_some(Effect::PlayReply(Reply::NotHeard));
+            match timings.dialog {
+                // В диалоге — обратно в диалог (слушаем дальше).
+                Some(idle) => Transition::to(
+                    S::Conversation { until: now + idle },
+                    not_heard.into_iter().collect(),
+                ),
+                None => Transition::to(
+                    S::Idle,
+                    not_heard
+                        .into_iter()
+                        .chain([Effect::SetTranscribing(false)])
+                        .collect(),
+                ),
             }
-            Transition::to(S::Idle, effects)
+        }
+        // Долго без команд — режим диалога выключается сам.
+        (S::Conversation { until }, E::Tick) if now >= until => {
+            Transition::to(S::Idle, vec![Effect::SetTranscribing(false)])
         }
         (S::FollowUp { until }, E::Tick) if now >= until => {
             Transition::to(S::Idle, vec![Effect::SetTranscribing(false)])
@@ -366,6 +444,12 @@ mod tests {
         listen: Duration::from_secs(6),
         follow_up: Duration::from_secs(12),
         ask: Duration::from_secs(10),
+        dialog: None,
+    };
+    const IDLE: Duration = Duration::from_secs(600);
+    const D: Timings = Timings {
+        dialog: Some(IDLE),
+        ..T
     };
 
     fn asking(t0: Instant) -> State {
@@ -1053,6 +1137,140 @@ mod tests {
                 transition(state, Event::Asked, t0, T),
                 Transition::stay(state),
                 "{state:?}"
+            );
+        }
+    }
+
+    fn conversation(t0: Instant) -> State {
+        State::Conversation { until: t0 + IDLE }
+    }
+
+    #[test]
+    fn dialog_starts_from_waiting_states() {
+        let t0 = now();
+        for state in [
+            State::Idle,
+            State::Listening {
+                until: t0,
+                retry: false,
+            },
+            State::FollowUp { until: t0 },
+            conversation(t0),
+        ] {
+            let tr = transition(state, Event::DialogStart, t0, D);
+            assert_eq!(tr.next, conversation(t0), "{state:?}");
+            assert_eq!(
+                tr.effects,
+                [
+                    Effect::SetTranscribing(true),
+                    Effect::PlayReply(Reply::Wake)
+                ]
+            );
+            // Без включённого режима в ядре — ничего не меняется.
+            assert_eq!(
+                transition(state, Event::DialogStart, t0, T),
+                Transition::stay(state)
+            );
+        }
+        for state in [State::Executing, State::Paused, asking(t0)] {
+            assert_eq!(
+                transition(state, Event::DialogStart, t0, D),
+                Transition::stay(state)
+            );
+        }
+    }
+
+    #[test]
+    fn dialog_executes_commands_without_wake_word_and_returns() {
+        let t0 = now();
+        let tr = transition(conversation(t0), cmd("open_youtube"), t0, D);
+        assert_eq!(tr.next, State::Executing);
+        let t1 = t0 + Duration::from_secs(30);
+        let done = transition(
+            State::Executing,
+            Event::ActionFinished {
+                reply: Some(Reply::Done),
+            },
+            t1,
+            D,
+        );
+        assert_eq!(done.next, State::Conversation { until: t1 + IDLE });
+        assert_eq!(done.effects, [Effect::PlayReply(Reply::Done)]);
+        // Непонятное — молча, ожидание не продлевается.
+        assert_eq!(
+            transition(conversation(t0), Event::NotUnderstood, t0, D),
+            Transition::stay(conversation(t0))
+        );
+        assert_eq!(
+            transition(conversation(t0), Event::UserSpeaking, t0, D),
+            Transition::stay(conversation(t0))
+        );
+        assert!(conversation(t0).accepts_commands());
+    }
+
+    #[test]
+    fn dialog_survives_questions_refusals_and_silence() {
+        let t0 = now();
+        let ask = transition(conversation(t0), Event::NeedPermission("x".into()), t0, D);
+        assert_eq!(ask.next, asking(t0));
+        let denied = transition(asking(t0), Event::PermissionDenied, t0, D);
+        assert_eq!(denied.next, conversation(t0));
+        let silent = transition(asking(t0), Event::Tick, t0 + T.ask, D);
+        assert_eq!(
+            silent.next,
+            State::Conversation {
+                until: t0 + T.ask + IDLE
+            }
+        );
+        assert_eq!(silent.effects, [Effect::CloseAsk]);
+        // «Джарвис» в диалоге и тишина после него — снова диалог.
+        let wake = transition(conversation(t0), Event::WakeWord, t0, D);
+        assert_eq!(wake.effects, [Effect::PlayReply(Reply::Wake)]);
+        let quiet = transition(wake.next, Event::Tick, t0 + T.listen, D);
+        assert_eq!(
+            quiet.next,
+            State::Conversation {
+                until: t0 + T.listen + IDLE
+            }
+        );
+        assert_eq!(quiet.effects, [Effect::PlayReply(Reply::NotHeard)]);
+    }
+
+    #[test]
+    fn dialog_ends_by_command_idle_or_stop() {
+        let t0 = now();
+        let end = transition(conversation(t0), Event::DialogEnd, t0, D);
+        assert_eq!(end.next, State::Idle);
+        assert_eq!(
+            end.effects,
+            [
+                Effect::SetTranscribing(false),
+                Effect::PlayReply(Reply::Done)
+            ]
+        );
+        assert_eq!(
+            transition(conversation(t0), Event::Tick, t0, D),
+            Transition::stay(conversation(t0))
+        );
+        let idle = transition(conversation(t0), Event::Tick, t0 + IDLE, D);
+        assert_eq!(idle.next, State::Idle);
+        assert_eq!(idle.effects, [Effect::SetTranscribing(false)]);
+        assert_eq!(
+            transition(conversation(t0), Event::VoiceStop, t0, D).next,
+            State::Idle
+        );
+        assert_eq!(
+            transition(conversation(t0), Event::EmergencyStop, t0, D).next,
+            State::Paused
+        );
+        assert_eq!(
+            transition(conversation(t0), Event::TogglePause, t0, D).next,
+            State::Paused
+        );
+        for state in [State::Idle, State::Executing, State::Paused] {
+            assert_eq!(
+                transition(state, Event::DialogEnd, t0, D),
+                Transition::stay(state)
             );
         }
     }

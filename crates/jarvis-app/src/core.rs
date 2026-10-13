@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 use jarvis_actions::{ActionError, CancelToken, Outcome, Question, Sound, System};
 use jarvis_app::resolver::{
-    BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS, BUILTIN_STOP, CommandResolver,
-    EXACT_SCORE, EarlyDecider, Resolution, hotword_phrases, is_builtin, spoken_phrase,
+    BUILTIN_DIALOG_OFF, BUILTIN_DIALOG_ON, BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS,
+    BUILTIN_STOP, CommandResolver, EXACT_SCORE, EarlyDecider, Resolution, hotword_phrases,
+    is_builtin, spoken_phrase,
 };
 use jarvis_app::speech::{self, Speech, SpeechEvent};
 use jarvis_app::system::PlatformSystem;
@@ -314,6 +315,7 @@ impl Core {
                 listen: Duration::from_secs(u64::from(p.config.wake.listen_secs)),
                 follow_up: Duration::from_secs(u64::from(p.config.session.follow_up_secs)),
                 ask: ASK_TIMEOUT,
+                dialog: None,
             },
             pipeline,
             player,
@@ -482,7 +484,10 @@ impl Core {
     fn on_wake(&mut self, wake: WakeEvent) {
         let answering = matches!(
             self.state,
-            State::Idle | State::Listening { .. } | State::FollowUp { .. }
+            State::Idle
+                | State::Listening { .. }
+                | State::FollowUp { .. }
+                | State::Conversation { .. }
         );
         self.apply(Event::WakeWord);
         if answering {
@@ -630,6 +635,25 @@ impl Core {
             };
             self.write_journal(&approval, &id, if ok { "ok" } else { "failed" }, None);
             self.play(if ok { Reply::Done } else { Reply::Failed });
+            return;
+        }
+        if id == BUILTIN_DIALOG_ON || id == BUILTIN_DIALOG_OFF {
+            // Безвредные встроенные — без вопроса.
+            let on = id == BUILTIN_DIALOG_ON;
+            tracing::info!(on, "режим диалога");
+            self.timings.dialog = on
+                .then(|| Duration::from_secs(u64::from(self.config.session.dialog_idle_mins) * 60));
+            let approval = Approval {
+                heard,
+                note: PermissionNote::Builtin,
+                answered_by: None,
+            };
+            self.write_journal(&approval, &id, "ok", None);
+            self.apply(if on {
+                Event::DialogStart
+            } else {
+                Event::DialogEnd
+            });
             return;
         }
         if id == BUILTIN_FORGET_PERMISSIONS {
@@ -1300,6 +1324,11 @@ impl Core {
                 }
             }
         }
+        // Режим диалога кончился (выход, тайм-аут, стоп, пауза) — забыть его.
+        if matches!(self.state, State::Idle | State::Paused) && self.timings.dialog.is_some() {
+            tracing::info!("режим диалога выключен");
+            self.timings.dialog = None;
+        }
         // Вопрос команды действует, пока ждём ответ; новое «Джарвис» — новый разговор.
         if !matches!(self.state, State::Listening { .. }) || event == Event::WakeWord {
             self.choice = None;
@@ -1319,9 +1348,14 @@ impl Core {
             (_, None, false) => Indicator::Starting,
             (State::Idle, None, true) => Indicator::Idle,
             (State::AskingPermission { .. }, None, true) => Indicator::Asking,
-            (State::Listening { .. } | State::Executing | State::FollowUp { .. }, None, true) => {
-                Indicator::Listening
-            }
+            (
+                State::Listening { .. }
+                | State::Executing
+                | State::FollowUp { .. }
+                | State::Conversation { .. },
+                None,
+                true,
+            ) => Indicator::Listening,
         };
         if self.ui.send(indicator).is_ok() {
             self.waker.wake();

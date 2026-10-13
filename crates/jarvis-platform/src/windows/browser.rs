@@ -4,7 +4,10 @@
 //!
 //! Firefox показывает свои вкладки в дереве UI Automation как элементы
 //! TabItem внутри полосы `tabbrowser-tabs`; вкладки внутри страниц (YouTube
-//! Music, Google Keep) лежат глубже и в эту полосу не входят.
+//! Music, Google Keep) лежат глубже и в эту полосу не входят. Вкладки
+//! свёрнутой группы в дереве не видны: группу (кнопка `tab-group-label`)
+//! приходится раскрыть — нашлась вкладка — группа остаётся открытой, нет —
+//! сворачивается обратно.
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
@@ -12,15 +15,20 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationSelectionItemPattern, TreeScope_Children,
-    TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ControlTypePropertyId,
-    UIA_SelectionItemPatternId, UIA_TabItemControlTypeId,
+    CUIAutomation, ExpandCollapseState_Collapsed, IUIAutomation, IUIAutomationCondition,
+    IUIAutomationElement, IUIAutomationExpandCollapsePattern, IUIAutomationSelectionItemPattern,
+    TreeScope_Children, TreeScope_Descendants, UIA_AutomationIdPropertyId, UIA_ClassNamePropertyId,
+    UIA_ControlTypePropertyId, UIA_ExpandCollapsePatternId, UIA_SelectionItemPatternId,
+    UIA_TabItemControlTypeId,
 };
 use windows_sys::Win32::Foundation::{HWND as RawHwnd, INVALID_HANDLE_VALUE, LPARAM};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
     IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
@@ -31,6 +39,12 @@ use super::{OwnedHandle, last_error};
 
 const FIREFOX_WINDOW_CLASS: &str = "MozillaWindowClass";
 const FIREFOX_TAB_STRIP: &str = "tabbrowser-tabs";
+const FIREFOX_TAB_GROUP: &str = "tab-group-label";
+/// Сколько ждать, пока вкладки раскрытой группы появятся в дереве (обычно ~60 мс).
+const GROUP_EXPAND_WAIT: std::time::Duration = std::time::Duration::from_millis(600);
+/// Виртуальная клавиша без назначения (0xE8 — «unassigned» в документации
+/// Windows): её «нажатие» ни на что не влияет, но снимает запрет на смену фокуса.
+const VK_UNASSIGNED: u16 = 0xE8;
 
 /// Ищет вкладку Firefox, заголовок которой подходит, делает её текущей и
 /// выводит окно вперёд. `Ok(None)` — браузер не открыт или такой вкладки нет.
@@ -74,6 +88,8 @@ fn select_tab(
             UIA_ControlTypePropertyId,
             &VARIANT::from(UIA_TabItemControlTypeId.0),
         )?;
+        let group = automation
+            .CreatePropertyCondition(UIA_ClassNamePropertyId, &VARIANT::from(FIREFOX_TAB_GROUP))?;
         for &hwnd in windows {
             // Окно закрылось или полосы вкладок нет (служебное окно) — дальше.
             let Ok(window) = automation.ElementFromHandle(HWND(hwnd)) else {
@@ -82,20 +98,80 @@ fn select_tab(
             let Ok(tabs_strip) = window.FindFirst(TreeScope_Descendants, &strip) else {
                 continue;
             };
-            let tabs = tabs_strip.FindAll(TreeScope_Children, &tab)?;
-            for i in 0..tabs.Length()? {
-                let item = tabs.GetElement(i)?;
-                let title = item.CurrentName()?.to_string();
-                if matches(&title) {
-                    let select: IUIAutomationSelectionItemPattern =
-                        item.GetCurrentPatternAs(UIA_SelectionItemPatternId)?;
-                    select.Select()?;
+            // Сначала видимые вкладки.
+            let (found, seen) = find_tab(&tabs_strip, &tab, matches)?;
+            if let Some(title) = found {
+                return Ok(Some((hwnd, title)));
+            }
+            // Затем свёрнутые группы — по одной. Окно — сначала вперёд: пока
+            // оно закрыто другими, Firefox не дорисовывает раскрытие группы и
+            // вкладки в дереве не появляются (проверено: 0 новых за 1 с против
+            // всех за 0.1 с у окна на виду).
+            let groups = tabs_strip.FindAll(TreeScope_Children, &group)?;
+            if groups.Length()? > 0 {
+                bring_to_front(hwnd);
+            }
+            for i in 0..groups.Length()? {
+                let label = groups.GetElement(i)?;
+                let Ok(toggle) = label.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                    UIA_ExpandCollapsePatternId,
+                ) else {
+                    continue;
+                };
+                if toggle.CurrentExpandCollapseState()? != ExpandCollapseState_Collapsed {
+                    continue;
+                }
+                toggle.Expand()?;
+                let deadline = std::time::Instant::now() + GROUP_EXPAND_WAIT;
+                let found = loop {
+                    let (hit, count) = find_tab(&tabs_strip, &tab, matches)?;
+                    if hit.is_some() || count > seen || std::time::Instant::now() >= deadline {
+                        break hit;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                if let Some(title) = found {
                     return Ok(Some((hwnd, title)));
                 }
+                // Не здесь — свернуть, как было.
+                let _ = toggle.Collapse();
             }
         }
         Ok(None)
     }
+}
+
+/// Ищет среди видимых вкладок полосы подходящую и выбирает её.
+/// Возвращает (заголовок выбранной, сколько вкладок видно).
+fn find_tab(
+    strip: &IUIAutomationElement,
+    tab: &IUIAutomationCondition,
+    matches: &dyn Fn(&str) -> bool,
+) -> windows::core::Result<(Option<String>, i32)> {
+    // SAFETY: элементы — из дерева UI Automation, интерфейсы освобождаются Drop.
+    unsafe {
+        let tabs = strip.FindAll(TreeScope_Children, tab)?;
+        let count = tabs.Length()?;
+        for i in 0..count {
+            let item = tabs.GetElement(i)?;
+            let title = item.CurrentName()?.to_string();
+            if matches(&title) {
+                let select: IUIAutomationSelectionItemPattern =
+                    item.GetCurrentPatternAs(UIA_SelectionItemPatternId)?;
+                select.Select()?;
+                return Ok((Some(title), count));
+            }
+        }
+        Ok((None, count))
+    }
+}
+
+/// Вывести вперёд верхнее окно Firefox (после открытия новой вкладки).
+/// `false` — браузер не открыт или Windows не дала сменить окно.
+pub fn focus_browser() -> bool {
+    browser_windows()
+        .first()
+        .is_some_and(|&hwnd| bring_to_front(hwnd))
 }
 
 /// Видимые окна Firefox сверху вниз (последнее активное — первым).
@@ -128,18 +204,21 @@ unsafe extern "system" fn collect_window(hwnd: RawHwnd, lparam: LPARAM) -> BOOL 
     1 // продолжать перебор
 }
 
-/// Развернуть свёрнутое окно и сделать активным. Windows не даёт фоновому
-/// процессу забирать фокус — тогда на время вызова поток Джарвиса
-/// подключается к вводу активного окна (штатный способ AttachThreadInput).
-fn bring_to_front(hwnd: RawHwnd) {
+/// Развернуть свёрнутое окно и сделать активным; `true` — окно стало активным.
+/// Windows не даёт фоновому процессу забирать фокус, поэтому по очереди:
+/// просто попросить; подключиться к вводу активного окна (AttachThreadInput);
+/// «нажать» клавишу без назначения — после своего ввода процессу разрешено
+/// сменить активное окно.
+fn bring_to_front(hwnd: RawHwnd) -> bool {
     // SAFETY: hwnd — окно из EnumWindows; если оно уже закрыто, функции просто вернут ошибку.
     unsafe {
         if IsIconic(hwnd) != 0 {
             ShowWindow(hwnd, SW_RESTORE);
         }
-        if SetForegroundWindow(hwnd) != 0 {
-            return;
-        }
+        SetForegroundWindow(hwnd);
+    }
+    if is_foreground(hwnd) {
+        return true;
     }
     // SAFETY: активное окно и его поток — от WinAPI; второй аргумент
     // GetWindowThreadProcessId (номер процесса) не нужен — null.
@@ -147,17 +226,43 @@ fn bring_to_front(hwnd: RawHwnd) {
         unsafe { GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut()) };
     // SAFETY: без аргументов.
     let me = unsafe { GetCurrentThreadId() };
-    if foreground_thread == 0 || foreground_thread == me {
-        return;
-    }
-    // SAFETY: подключение ввода снимается сразу после вызова.
-    unsafe {
-        if AttachThreadInput(me, foreground_thread, 1) != 0 {
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
-            AttachThreadInput(me, foreground_thread, 0);
+    if foreground_thread != 0 && foreground_thread != me {
+        // SAFETY: подключение ввода снимается сразу после вызова.
+        unsafe {
+            if AttachThreadInput(me, foreground_thread, 1) != 0 {
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+                AttachThreadInput(me, foreground_thread, 0);
+            }
         }
     }
+    if is_foreground(hwnd) {
+        return true;
+    }
+    let key = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_UNASSIGNED,
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [key(false), key(true)];
+    // SAFETY: массив INPUT из двух элементов, размер структуры передан точно.
+    unsafe {
+        SendInput(2, inputs.as_ptr(), size_of::<INPUT>() as i32);
+        SetForegroundWindow(hwnd);
+    }
+    is_foreground(hwnd)
+}
+
+fn is_foreground(hwnd: RawHwnd) -> bool {
+    // SAFETY: без аргументов.
+    unsafe { GetForegroundWindow() == hwnd }
 }
 
 /// Запущен ли процесс с таким именем файла (`steam.exe`), без учёта регистра.
@@ -207,5 +312,21 @@ mod tests {
         // Браузер может быть открыт или нет — в обоих случаях не ошибка.
         let found = activate_browser_tab(&|_| false).unwrap();
         assert_eq!(found, None);
+    }
+
+    /// Живая проверка на открытом Firefox: вкладка из переменной окружения
+    /// JARVIS_TAB_TEST (часть заголовка) выбирается, даже если лежит в
+    /// свёрнутой группе, и окно выходит вперёд. Запуск вручную:
+    /// `JARVIS_TAB_TEST=Календарь cargo test -p jarvis-platform live_tab -- --ignored`.
+    #[test]
+    #[ignore = "переключает вкладку в настоящем Firefox"]
+    fn live_tab_activation() {
+        let wanted = std::env::var("JARVIS_TAB_TEST").unwrap();
+        let started = std::time::Instant::now();
+        let found = activate_browser_tab(&|title| title.contains(&wanted)).unwrap();
+        eprintln!("найдено: {found:?} за {} мс", started.elapsed().as_millis());
+        assert!(found.is_some());
+        let front = browser_windows().first().copied().unwrap();
+        assert!(is_foreground(front), "окно браузера не вышло вперёд");
     }
 }

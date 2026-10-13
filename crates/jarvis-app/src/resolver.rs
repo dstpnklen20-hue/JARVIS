@@ -68,6 +68,8 @@ pub const EXACT_SCORE: f32 = 0.99;
 pub const BUILTIN_STOP: &str = "builtin:stop";
 pub const BUILTIN_FORGET_PERMISSIONS: &str = "builtin:forget_permissions";
 pub const BUILTIN_RELOAD_COMMANDS: &str = "builtin:reload_commands";
+pub const BUILTIN_DIALOG_ON: &str = "builtin:dialog_on";
+pub const BUILTIN_DIALOG_OFF: &str = "builtin:dialog_off";
 
 const BUILTINS: &[(&str, &[&str])] = &[
     (
@@ -88,6 +90,23 @@ const BUILTINS: &[(&str, &[&str])] = &[
             "обнови команды",
             "перезагрузи команды",
             "обнови список команд",
+        ],
+    ),
+    (
+        BUILTIN_DIALOG_ON,
+        &[
+            "режим диалога",
+            "включи режим диалога",
+            "перейди в режим диалога",
+            "давай поговорим",
+        ],
+    ),
+    (
+        BUILTIN_DIALOG_OFF,
+        &[
+            "выйди из режима диалога",
+            "закончим диалог",
+            "конец диалога",
         ],
     ),
 ];
@@ -495,6 +514,10 @@ mod tests {
         assert_eq!(id("джарвис стоп"), BUILTIN_STOP);
         assert_eq!(id("хватит"), BUILTIN_STOP);
         assert_eq!(id("забудь разрешения"), BUILTIN_FORGET_PERMISSIONS);
+        assert_eq!(id("джарвис режим диалога"), BUILTIN_DIALOG_ON);
+        assert_eq!(id("включи режим диалога"), BUILTIN_DIALOG_ON);
+        assert_eq!(id("выйди из режима диалога"), BUILTIN_DIALOG_OFF);
+        assert_eq!(id("закончим диалог"), BUILTIN_DIALOG_OFF);
         assert!(is_builtin(BUILTIN_STOP));
         assert!(!is_builtin("open_youtube"));
     }

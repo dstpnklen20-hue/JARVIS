@@ -25,6 +25,7 @@ pub const USER_FILE: &str = "config/user.toml";
 pub const SYSTEM_DEFAULT_DEVICE: &str = "default";
 
 pub const FOLLOW_UP_SECS_RANGE: std::ops::RangeInclusive<u32> = 3..=60;
+pub const DIALOG_IDLE_MINS_RANGE: std::ops::RangeInclusive<u32> = 1..=120;
 pub const LOG_MAX_FILES_RANGE: std::ops::RangeInclusive<usize> = 1..=365;
 pub const LISTEN_SECS_RANGE: std::ops::RangeInclusive<u32> = 2..=30;
 pub const MAX_EDIT_DISTANCE: usize = 2;
@@ -193,6 +194,8 @@ impl Audio {
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub follow_up_secs: u32,
+    /// Режим диалога выключается сам, если столько минут не было команд.
+    pub dialog_idle_mins: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -412,6 +415,11 @@ impl Config {
             TTS_SPEED_RANGE.contains(&self.voice.tts_speed),
             "voice.tts_speed",
             out_of_range(self.voice.tts_speed, &TTS_SPEED_RANGE),
+        );
+        check(
+            DIALOG_IDLE_MINS_RANGE.contains(&self.session.dialog_idle_mins),
+            "session.dialog_idle_mins",
+            out_of_range(self.session.dialog_idle_mins, &DIALOG_IDLE_MINS_RANGE),
         );
         check(
             FOLLOW_UP_SECS_RANGE.contains(&self.session.follow_up_secs),
