@@ -69,6 +69,8 @@ pub enum Event {
     NotUnderstood,
     /// Команда узнана, но число в ней вне допустимого диапазона.
     InvalidValue,
+    /// Команда задала вопрос (`ask`) — ждать ответ, как команду после «Джарвис».
+    Asked,
     /// Команда выполнена; `reply` — что сказать (уже выбрано ядром:
     /// ответ команды при успехе, «не удалось» при ошибке, ничего для `say`).
     ActionFinished {
@@ -325,6 +327,11 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         (S::Idle | S::Executing, E::InvalidValue) => Transition::stay(state),
         // Команда без «Джарвис» в ожидании и вторая команда во время первой — игнор.
         (S::Idle | S::Executing, E::Command(_)) => Transition::stay(state),
+
+        // --- вопрос из команды: ответ ждём, как команду после «Джарвис»
+        // (непонятно — «Не понял, сэр», тишина — «Не расслышал, сэр») ---
+        (S::Executing, E::Asked) => Transition::to(listening(false), Vec::new()),
+        (_, E::Asked) => Transition::stay(state),
 
         // --- окончание команды ---
         (S::Executing, E::ActionFinished { reply }) => Transition::to(
@@ -1021,5 +1028,32 @@ mod tests {
             [Effect::SetTranscribing(false)]
         );
         assert_eq!(s, State::Idle);
+    }
+
+    #[test]
+    fn question_from_command_waits_for_answer() {
+        let t0 = now();
+        let tr = transition(State::Executing, Event::Asked, t0, T);
+        assert_eq!(
+            tr.next,
+            State::Listening {
+                until: t0 + T.listen,
+                retry: false
+            }
+        );
+        assert!(tr.effects.is_empty());
+        // Молчание после вопроса — «Не расслышал, сэр».
+        let silent = transition(tr.next, Event::Tick, t0 + T.listen, T);
+        assert_eq!(silent.effects[0], Effect::PlayReply(Reply::NotHeard));
+        for state in all_states(t0).into_iter().chain([asking(t0)]) {
+            if state == State::Executing {
+                continue;
+            }
+            assert_eq!(
+                transition(state, Event::Asked, t0, T),
+                Transition::stay(state),
+                "{state:?}"
+            );
+        }
     }
 }

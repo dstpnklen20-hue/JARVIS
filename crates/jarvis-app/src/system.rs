@@ -72,4 +72,12 @@ impl System for PlatformSystem {
             PowerOp::Shutdown => P::Shutdown,
         })
     }
+
+    fn activate_tab(&self, matches: &dyn Fn(&str) -> bool) -> Result<Option<String>, String> {
+        jarvis_platform::activate_browser_tab(matches)
+    }
+
+    fn process_running(&self, name: &str) -> Result<bool, String> {
+        jarvis_platform::process_running(name)
+    }
 }

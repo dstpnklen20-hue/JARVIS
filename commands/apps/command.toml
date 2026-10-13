@@ -50,12 +50,3 @@ reply = "ok"
 type = "launch_app"
 path = "explorer.exe"
 args = ['shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude']
-
-[[command]]
-id = "app_happ"
-phrases = ["запусти хап", "открой хап", "запусти хапп", "включи хап"]
-description = "запустит Happ (прокси)"
-reply = "ok"
-[command.action]
-type = "launch_app"
-path = 'E:\SCS\Happ\Happ.exe'

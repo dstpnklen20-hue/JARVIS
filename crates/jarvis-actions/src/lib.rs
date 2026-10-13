@@ -14,13 +14,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use jarvis_core::commands::{
-    ActionSpec, DEFAULT_SCRIPT_TIMEOUT_SEC, MediaOp, PowerOp, ScriptKind, validate_url,
+    ActionSpec, DEFAULT_SCRIPT_TIMEOUT_SEC, MediaOp, PowerOp, ScriptKind, title_matches,
+    validate_url,
 };
 
 /// Громкость по умолчанию меняется на 10 % (одно нажатие ≈ 2 %).
 pub const DEFAULT_VOLUME_STEPS: u32 = 5;
 pub const DEFAULT_KEY_HOLD_MS: u64 = 30;
 pub const DEFAULT_KEY_INTERVAL_MS: u64 = 50;
+/// Как часто проверять, запустился ли процесс (`wait_process`).
+pub const PROCESS_POLL: Duration = Duration::from_millis(500);
 
 /// Флаг отмены действия; клонируется и передаётся между потоками.
 #[derive(Debug, Clone, Default)]
@@ -96,6 +99,11 @@ pub trait System: Send + Sync {
     /// Отпускание гарантировано (и аварийной остановкой тоже).
     fn press_keys(&self, vks: &[u16], hold: Duration) -> Result<(), String>;
     fn power(&self, op: PowerOp) -> Result<(), String>;
+    /// Найти открытую вкладку браузера, заголовок которой подходит, сделать её
+    /// текущей и вывести окно вперёд. `Ok(None)` — такой вкладки нет.
+    fn activate_tab(&self, matches: &dyn Fn(&str) -> bool) -> Result<Option<String>, String>;
+    /// Запущен ли процесс с таким именем файла (`steam.exe`), без учёта регистра.
+    fn process_running(&self, name: &str) -> Result<bool, String>;
 }
 
 /// Чем закончилось действие.
@@ -104,6 +112,17 @@ pub enum Outcome {
     Done,
     /// `say`: что проиграть (проигрывает ядро — у него звук).
     Play(Sound),
+    /// `ask`: задать вопрос и ждать ответа — дальше решает ядро.
+    Ask(Question),
+}
+
+/// Вопрос с вариантами ответа.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    /// WAV вопроса (путь уже проверен и абсолютный).
+    pub sound: PathBuf,
+    /// Как отвечают → id команды.
+    pub choices: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +155,10 @@ pub enum ActionError {
     Power(String),
     #[error("недопустимые параметры действия: {0}")]
     Invalid(String),
+    #[error("{name} не запустился за {secs} с")]
+    ProcessNotStarted { name: String, secs: u64 },
+    #[error("не удалось проверить процессы: {0}")]
+    Processes(String),
 }
 
 fn tail(output: &str) -> String {
@@ -170,9 +193,21 @@ pub fn execute(action: &ActionSpec, ctx: &Context<'_>) -> Result<Outcome, Action
             file: Some(file), ..
         } => Ok(Outcome::Play(Sound::File(ctx.dir.join(file)))),
         ActionSpec::Say { .. } => Err(ActionError::Invalid("say без reply и file".into())),
-        ActionSpec::OpenUrl { url } => {
+        ActionSpec::OpenUrl { url, find_tab } => {
             // Повторная проверка — после подстановки слотов адрес мог измениться.
             validate_url(url).map_err(ActionError::Invalid)?;
+            if !find_tab.is_empty() {
+                let matches = |title: &str| find_tab.iter().any(|p| title_matches(p, title));
+                match ctx.system.activate_tab(&matches) {
+                    Ok(Some(title)) => {
+                        tracing::info!(%title, "вкладка уже открыта — переключаюсь");
+                        return Ok(Outcome::Done);
+                    }
+                    Ok(None) => {}
+                    // Не нашли из-за сбоя — не беда: просто откроем адрес.
+                    Err(e) => tracing::warn!(error = %e, "не удалось поискать вкладку"),
+                }
+            }
             ctx.system.open_url(url).map_err(ActionError::OpenUrl)?;
             Ok(Outcome::Done)
         }
@@ -283,12 +318,43 @@ pub fn execute(action: &ActionSpec, ctx: &Context<'_>) -> Result<Outcome, Action
         }
         ActionSpec::Sequence { steps } => {
             for step in steps {
-                if let Outcome::Play(sound) = execute(step, ctx)? {
-                    (ctx.play)(sound);
+                match execute(step, ctx)? {
+                    Outcome::Play(sound) => (ctx.play)(sound),
+                    // Вопрос — всегда последний шаг (проверено в манифесте).
+                    Outcome::Ask(question) => return Ok(Outcome::Ask(question)),
+                    Outcome::Done => {}
                 }
             }
             Ok(Outcome::Done)
         }
+        ActionSpec::WaitProcess { name, timeout_sec } => {
+            let deadline = Instant::now() + Duration::from_secs(*timeout_sec);
+            loop {
+                if ctx
+                    .system
+                    .process_running(name)
+                    .map_err(ActionError::Processes)?
+                {
+                    return Ok(Outcome::Done);
+                }
+                if Instant::now() >= deadline {
+                    return Err(ActionError::ProcessNotStarted {
+                        name: name.clone(),
+                        secs: *timeout_sec,
+                    });
+                }
+                if !ctx.cancel.sleep(PROCESS_POLL) {
+                    return Err(ActionError::Cancelled);
+                }
+            }
+        }
+        ActionSpec::Ask { file, choices } => Ok(Outcome::Ask(Question {
+            sound: ctx.dir.join(file),
+            choices: choices
+                .iter()
+                .map(|(answer, id)| (answer.clone(), id.clone()))
+                .collect(),
+        })),
     }
 }
 
@@ -347,6 +413,11 @@ mod tests {
         calls: Mutex<Vec<String>>,
         fail: bool,
         process_end: Option<ProcessEnd>,
+        /// Заголовки открытых вкладок.
+        tabs: Vec<String>,
+        /// Через сколько проверок процесс «запустится» (`None` — никогда).
+        process_after: Option<usize>,
+        checks: Mutex<usize>,
     }
 
     impl Fake {
@@ -396,6 +467,17 @@ mod tests {
         fn power(&self, op: PowerOp) -> Result<(), String> {
             self.log(format!("power {op:?}"))
         }
+        fn activate_tab(&self, matches: &dyn Fn(&str) -> bool) -> Result<Option<String>, String> {
+            let found = self.tabs.iter().find(|t| matches(t)).cloned();
+            self.log(format!("tab {found:?}"))?;
+            Ok(found)
+        }
+        fn process_running(&self, name: &str) -> Result<bool, String> {
+            let mut checks = self.checks.lock().unwrap();
+            *checks += 1;
+            self.log(format!("check {name}"))?;
+            Ok(self.process_after.is_some_and(|n| *checks > n))
+        }
     }
 
     fn calls(f: &Fake) -> Vec<String> {
@@ -427,10 +509,12 @@ mod tests {
         let fake = Fake::default();
         let ok = ActionSpec::OpenUrl {
             url: "https://www.youtube.com".into(),
+            find_tab: Vec::new(),
         };
         assert_eq!(run(&ok, &fake), Ok(Outcome::Done));
         let bad = ActionSpec::OpenUrl {
             url: "file:///C:/Windows/System32/cmd.exe".into(),
+            find_tab: Vec::new(),
         };
         assert!(matches!(run(&bad, &fake), Err(ActionError::Invalid(_))));
         assert_eq!(calls(&fake), ["open https://www.youtube.com"]);
@@ -612,6 +696,7 @@ mod tests {
                 ActionSpec::Wait { ms: 1 },
                 ActionSpec::OpenUrl {
                     url: "https://ya.ru".into(),
+                    find_tab: Vec::new(),
                 },
             ],
         };
@@ -641,6 +726,7 @@ mod tests {
                 ActionSpec::Wait { ms: 5_000 },
                 ActionSpec::OpenUrl {
                     url: "https://ya.ru".into(),
+                    find_tab: Vec::new(),
                 },
             ],
         };
@@ -683,5 +769,104 @@ mod tests {
             *played.lock().unwrap(),
             [Sound::File(Path::new("p").join("hi.wav"))]
         );
+    }
+
+    fn youtube(find_tab: &[&str]) -> ActionSpec {
+        ActionSpec::OpenUrl {
+            url: "https://www.youtube.com".into(),
+            find_tab: find_tab.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn open_url_switches_to_existing_tab() {
+        let fake = Fake {
+            tabs: vec!["YouTube Music".into(), "(3) Видео - YouTube".into()],
+            ..Fake::default()
+        };
+        assert_eq!(
+            run(&youtube(&["* - YouTube", "YouTube"]), &fake),
+            Ok(Outcome::Done)
+        );
+        assert_eq!(calls(&fake), ["tab Some(\"(3) Видео - YouTube\")"]);
+    }
+
+    #[test]
+    fn open_url_opens_when_no_tab_matches() {
+        let fake = Fake {
+            tabs: vec!["YouTube Music".into()],
+            ..Fake::default()
+        };
+        assert_eq!(
+            run(&youtube(&["* - YouTube", "YouTube"]), &fake),
+            Ok(Outcome::Done)
+        );
+        assert_eq!(calls(&fake), ["tab None", "open https://www.youtube.com"]);
+        // Без find_tab вкладки не ищутся.
+        let plain = Fake::default();
+        run(&youtube(&[]), &plain).unwrap();
+        assert_eq!(calls(&plain), ["open https://www.youtube.com"]);
+    }
+
+    #[test]
+    fn wait_process_polls_until_started_or_timeout() {
+        let started = Fake {
+            process_after: Some(1),
+            ..Fake::default()
+        };
+        let wait = |secs| ActionSpec::WaitProcess {
+            name: "steam.exe".into(),
+            timeout_sec: secs,
+        };
+        assert_eq!(run(&wait(5), &started), Ok(Outcome::Done));
+        assert_eq!(calls(&started), ["check steam.exe", "check steam.exe"]);
+
+        let never = Fake::default();
+        assert_eq!(
+            run(&wait(1), &never),
+            Err(ActionError::ProcessNotStarted {
+                name: "steam.exe".into(),
+                secs: 1
+            })
+        );
+
+        let cancel = CancelToken::default();
+        let canceller = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            canceller.cancel();
+        });
+        assert_eq!(
+            run_with(&wait(60), &Fake::default(), &cancel),
+            Err(ActionError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn ask_ends_sequence_with_question() {
+        let fake = Fake::default();
+        let action = ActionSpec::Sequence {
+            steps: vec![
+                ActionSpec::LaunchApp {
+                    path: "steam.exe".into(),
+                    args: vec![],
+                    working_dir: None,
+                },
+                ActionSpec::Ask {
+                    file: "ask.wav".into(),
+                    choices: [("кс".to_owned(), "game_cs2".to_owned())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        };
+        assert_eq!(
+            run(&action, &fake),
+            Ok(Outcome::Ask(Question {
+                sound: PathBuf::from("C:\\pack\\ask.wav"),
+                choices: vec![("кс".into(), "game_cs2".into())],
+            }))
+        );
+        assert_eq!(calls(&fake), ["spawn steam.exe []"]);
     }
 }

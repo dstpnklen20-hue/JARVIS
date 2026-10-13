@@ -276,6 +276,7 @@ mod tests {
             slots: Default::default(),
             action: ActionSpec::OpenUrl {
                 url: "https://www.youtube.com".into(),
+                find_tab: Vec::new(),
             },
             dir: PathBuf::from("commands/browser"),
         }

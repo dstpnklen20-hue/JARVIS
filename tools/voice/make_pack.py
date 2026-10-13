@@ -38,6 +38,10 @@ REPLIES = ("wake", "ok", "not_understood", "failed", "ask", "denied", "not_heard
 # Фраза, которая по смыслу относится к другому ответу, чем говорит её id:
 # «Простите, сэр, я не расслышал» — ответ на тишину после «Джарвис».
 GROUP_OF = {"not_understood_1": "not_heard"}
+# Фразы для личных команд (commands/my, не в git): id → имя файла там.
+# Берётся первый вариант с оценкой «эталон».
+COMMAND_SOUNDS = {"game_ask_1": "game_ask_1.wav", "game_loading_1": "game_loading_1.wav", "game_enjoy_1": "game_enjoy_1.wav"}
+COMMAND_PACK = ROOT / "commands" / "my"
 # Дубли, где пауза перед «сэр» вдвое короче (отмечены «!»): (id, источник, дубль).
 TIGHTEN: set[tuple[str, str, str]] = set()
 SOURCES = {"итог": None, "f5v2": OUT / "f5v2", "раунд1": OUT / "f5"}
@@ -111,6 +115,9 @@ def main() -> None:
             if (pid, source, take) in TIGHTEN:
                 before, after = tighten(dst, 0.5)
                 print(f"{dst.name}: пауза перед «сэр» {before:.2f} с → {after:.2f} с")
+            if pid in COMMAND_SOUNDS and n == 1 and COMMAND_PACK.is_dir():
+                shutil.copyfile(dst, COMMAND_PACK / COMMAND_SOUNDS[pid])
+                print(f"{pid} → commands/my/{COMMAND_SOUNDS[pid]}")
             if in_pack:
                 groups[group].append(dst)
             elif pid in GREETINGS:

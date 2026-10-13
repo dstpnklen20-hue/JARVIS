@@ -31,3 +31,6 @@ __pycache__/
 /checkpoints/
 /tools/voice/.venv-tts/
 /tools/voice/.venv-f5/
+
+# Личный пакет команд: пути этого компьютера и голос Джарвиса — не в git
+/commands/my/

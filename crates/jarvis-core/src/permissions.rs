@@ -286,7 +286,10 @@ mod tests {
             reply: ReplyChoice::Reply(Reply::Done),
             always_ask,
             slots: Default::default(),
-            action: ActionSpec::OpenUrl { url: url.into() },
+            action: ActionSpec::OpenUrl {
+                url: url.into(),
+                find_tab: Vec::new(),
+            },
             dir: PathBuf::from("commands/test"),
         }
     }
@@ -493,6 +496,7 @@ mod tests {
         let mut other_url = a.clone();
         other_url.action = ActionSpec::OpenUrl {
             url: "https://z.com".into(),
+            find_tab: Vec::new(),
         };
         let fp = fingerprint(&a);
         assert_eq!(fp.len(), 64);

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use std::path::PathBuf;
 
 use anyhow::Context as _;
-use jarvis_actions::{ActionError, CancelToken, Outcome, Sound, System};
+use jarvis_actions::{ActionError, CancelToken, Outcome, Question, Sound, System};
 use jarvis_app::resolver::{
     BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS, BUILTIN_STOP, CommandResolver,
     EXACT_SCORE, EarlyDecider, Resolution, hotword_phrases, is_builtin, spoken_phrase,
@@ -29,6 +29,7 @@ use jarvis_core::permissions::{Answer, PermissionStore, Verdict};
 use jarvis_core::slots::SlotValues;
 use jarvis_core::state::{Effect, Event, Reply, State, Timings, transition};
 use jarvis_nlu::answers::{PermissionReply, parse_reply};
+use jarvis_nlu::{CommandMatcher, CommandPhrases, MatchResult, Thresholds};
 use jarvis_platform::{DialogButton, DialogHandle, DialogSpec, Waker};
 
 use crate::tray::Indicator;
@@ -107,6 +108,44 @@ enum Purpose {
     Notice,
 }
 
+/// Команда спросила (`ask`) и ждёт ответа: варианты → команды.
+struct Choice {
+    matcher: CommandMatcher,
+    /// id команды по индексу в `matcher`.
+    ids: Vec<String>,
+}
+
+impl Choice {
+    fn new(question: &Question, thresholds: Thresholds) -> Self {
+        let mut ids: Vec<String> = Vec::new();
+        let mut entries: Vec<CommandPhrases> = Vec::new();
+        for (answer, id) in &question.choices {
+            match ids.iter().position(|known| known == id) {
+                Some(i) => entries[i].phrases.push(answer.clone()),
+                None => {
+                    ids.push(id.clone());
+                    entries.push(CommandPhrases {
+                        phrases: vec![answer.clone()],
+                        slots: Vec::new(),
+                    });
+                }
+            }
+        }
+        Self {
+            matcher: CommandMatcher::with_slots(&entries, thresholds),
+            ids,
+        }
+    }
+
+    /// Команда по ответу и уверенность.
+    fn resolve(&self, text: &str) -> Option<(String, f32)> {
+        match self.matcher.find(text) {
+            MatchResult::Matched(c) => Some((self.ids.get(c.command)?.clone(), c.score)),
+            _ => None,
+        }
+    }
+}
+
 /// Откуда аварийная остановка.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
@@ -180,6 +219,9 @@ fn expected_duration(action: &ActionSpec) -> Duration {
             Duration::from_millis(hold_ms.unwrap_or(30)) + ACTION_TIMEOUT
         }
         ActionSpec::Sequence { steps } => steps.iter().map(expected_duration).sum(),
+        ActionSpec::WaitProcess { timeout_sec, .. } => {
+            Duration::from_secs(*timeout_sec) + ACTION_TIMEOUT
+        }
         _ => ACTION_TIMEOUT,
     }
 }
@@ -232,6 +274,8 @@ pub struct Core {
     spoke_pending: Duration,
     /// Приветствие при запуске уже прозвучало (слух может перезапуститься).
     greeted: bool,
+    /// Ждём ответ на вопрос команды (`ask`).
+    choice: Option<Choice>,
     warn_elevated: bool,
 }
 
@@ -308,6 +352,7 @@ impl Core {
             clarifying: false,
             spoke_pending: Duration::ZERO,
             greeted: false,
+            choice: None,
             warn_elevated: p.elevated,
         })
     }
@@ -500,6 +545,11 @@ impl Core {
             if !t.text.trim().is_empty() {
                 self.apply(Event::UserSpeaking);
             }
+            // Ответ на вопрос — только по итогу фразы: короткое «кс» по началу
+            // фразы не отличить, а чужая команда не должна сработать раньше ответа.
+            if self.choice.is_some() {
+                return;
+            }
             let instant = self.resolver.instant(&t.text, &resolution);
             let score = match &resolution {
                 Resolution::Command { score, .. } => *score,
@@ -517,6 +567,14 @@ impl Core {
         }
         if !self.early.on_final(t.utterance) {
             return; // по этой фразе команда уже выполнена раньше
+        }
+        if let Some(choice) = &self.choice
+            && let Some((id, score)) = choice.resolve(&self.resolver.strip_wake(&t.text))
+        {
+            tracing::info!(text = %t.text, %id, score, "ответ на вопрос");
+            self.choice = None;
+            self.command(id, t.text, score, SlotValues::new(), now);
+            return;
         }
         tracing::info!(text = %t.text, ?resolution, "фраза");
         match resolution {
@@ -862,6 +920,10 @@ impl Core {
                 );
                 self.write_journal(&running.approval, &running.id, "ok", None);
                 match outcome {
+                    Outcome::Ask(question) => {
+                        self.ask_question(&question);
+                        return;
+                    }
                     Outcome::Play(sound) => {
                         self.play_sound(&sound);
                         None
@@ -884,6 +946,22 @@ impl Core {
             }
         };
         self.apply(Event::ActionFinished { reply });
+    }
+
+    /// Команда спросила: ждать ответ (как команду после «Джарвис»), затем
+    /// задать вопрос — время вопроса продлит ожидание (`flush_spoke`).
+    fn ask_question(&mut self, question: &Question) {
+        tracing::info!(choices = question.choices.len(), "вопрос — жду ответ");
+        self.apply(Event::Asked);
+        let nlu = &self.config.nlu;
+        self.choice = Some(Choice::new(
+            question,
+            Thresholds {
+                min_score: nlu.min_score,
+                ambiguity_margin: nlu.ambiguity_margin,
+            },
+        ));
+        self.play_sound(&Sound::File(question.sound.clone()));
     }
 
     // ---------- аварийная остановка и прочее ----------
@@ -1222,6 +1300,10 @@ impl Core {
                 }
             }
         }
+        // Вопрос команды действует, пока ждём ответ; новое «Джарвис» — новый разговор.
+        if !matches!(self.state, State::Listening { .. }) || event == Event::WakeWord {
+            self.choice = None;
+        }
         // Ответ, прозвучавший в этом переходе («Да, сэр»), не съедает ожидание.
         self.flush_spoke();
         if std::mem::discriminant(&before) != std::mem::discriminant(&self.state) {
@@ -1254,7 +1336,7 @@ fn permission_dialog(command: &Command, offer_always: bool, slots: &SlotValues) 
     let description = jarvis_core::slots::fill(&command.description, slots);
     let action = command.action.with_slots(slots);
     let details = match &action {
-        ActionSpec::OpenUrl { url } => format!("Адрес: {url}"),
+        ActionSpec::OpenUrl { url, .. } => format!("Адрес: {url}"),
         ActionSpec::LaunchApp { path, args, .. } => {
             format!(
                 "Программа: {path}\nАргументы: {}",
@@ -1367,6 +1449,7 @@ mod tests {
                 false,
                 ActionSpec::OpenUrl {
                     url: "https://www.youtube.com".into(),
+                    find_tab: Vec::new(),
                 },
             ),
             true,
@@ -1403,5 +1486,25 @@ mod tests {
         );
         assert!(!spec.buttons.iter().any(|b| b.id == BUTTON_ALWAYS));
         assert!(spec.text.contains("всегда спрашивает"));
+    }
+
+    #[test]
+    fn answer_to_question_picks_command() {
+        let question = Question {
+            sound: PathBuf::from("ask.wav"),
+            choices: vec![
+                ("кс".into(), "game_cs2".into()),
+                ("контра".into(), "game_cs2".into()),
+                ("контр страйк".into(), "game_cs2".into()),
+                ("дота".into(), "game_dota".into()),
+            ],
+        };
+        let choice = Choice::new(&question, Thresholds::default());
+        assert_eq!(choice.ids, ["game_cs2", "game_dota"]);
+        let id = |text: &str| choice.resolve(text).map(|(id, _)| id);
+        assert_eq!(id("кс").as_deref(), Some("game_cs2"));
+        assert_eq!(id("контр страйк").as_deref(), Some("game_cs2"));
+        assert_eq!(id("ну дота").as_deref(), Some("game_dota"));
+        assert_eq!(id("купи хлеба"), None);
     }
 }

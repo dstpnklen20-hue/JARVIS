@@ -60,8 +60,14 @@ pub enum ActionSpec {
         reply: Option<String>,
         file: Option<PathBuf>,
     },
-    /// Открыть адрес в браузере по умолчанию.
-    OpenUrl { url: String },
+    /// Открыть адрес в браузере по умолчанию. С `find_tab` сначала ищется
+    /// уже открытая вкладка с подходящим заголовком («* - YouTube»): нашлась —
+    /// переключиться на неё, нет — открыть адрес.
+    OpenUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        find_tab: Vec<String>,
+    },
     /// Мультимедиа-клавиши и громкость.
     Media {
         operation: MediaOp,
@@ -108,6 +114,17 @@ pub enum ActionSpec {
     Wait { ms: u64 },
     /// Цепочка действий по порядку; ошибка любого шага прерывает цепочку.
     Sequence { steps: Vec<ActionSpec> },
+    /// Дождаться, пока запустится процесс (`faceitclient.exe`); не дождались
+    /// за `timeout_sec` — ошибка («Не удалось, сэр»).
+    WaitProcess { name: String, timeout_sec: u64 },
+    /// Спросить голосом (WAV из папки пакета) и ждать ответа: ответ из
+    /// `choices` выполняет команду с этим id — со своим разрешением.
+    /// Только отдельным действием или последним шагом цепочки.
+    Ask {
+        file: PathBuf,
+        /// Как отвечают → id команды.
+        choices: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -146,6 +163,9 @@ pub const MAX_WAIT_MS: u64 = 60_000;
 pub const MAX_KEY_HOLD_MS: u64 = 10_000;
 pub const MAX_KEY_REPEAT: u32 = 100;
 pub const MAX_SEQUENCE_STEPS: usize = 50;
+pub const MAX_PROCESS_WAIT_SEC: u64 = 300;
+pub const MAX_ASK_CHOICES: usize = 30;
+pub const MAX_TAB_PATTERNS: usize = 10;
 
 impl ActionSpec {
     /// Что произойдёт — для журнала и вопроса-разрешения.
@@ -154,7 +174,13 @@ impl ActionSpec {
             ActionSpec::Say { reply: Some(r), .. } => format!("скажет ответ «{r}»"),
             ActionSpec::Say { file: Some(f), .. } => format!("проиграет {}", f.display()),
             ActionSpec::Say { .. } => "ничего не скажет".into(),
-            ActionSpec::OpenUrl { url } => format!("откроет {url}"),
+            ActionSpec::OpenUrl { url, find_tab } if find_tab.is_empty() => {
+                format!("откроет {url}")
+            }
+            ActionSpec::OpenUrl { url, find_tab } => format!(
+                "переключится на открытую вкладку «{}» или откроет {url}",
+                find_tab.join("» / «")
+            ),
             ActionSpec::Media {
                 operation: MediaOp::VolumeSet,
                 level,
@@ -192,6 +218,18 @@ impl ActionSpec {
                 PowerOp::Shutdown => "выключит компьютер".into(),
             },
             ActionSpec::Wait { ms } => format!("подождёт {ms} мс"),
+            ActionSpec::WaitProcess { name, timeout_sec } => {
+                format!("дождётся запуска {name} (не дольше {timeout_sec} с)")
+            }
+            ActionSpec::Ask { file, choices } => format!(
+                "спросит ({}) и по ответу выполнит: {}",
+                file.display(),
+                choices
+                    .iter()
+                    .map(|(answer, id)| format!("«{answer}» → {id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             ActionSpec::Sequence { steps } => steps
                 .iter()
                 .map(ActionSpec::summary)
@@ -203,7 +241,7 @@ impl ActionSpec {
     /// Все строки действия, в которые можно подставлять слоты.
     fn slot_targets(&self) -> Vec<&str> {
         match self {
-            ActionSpec::OpenUrl { url } => vec![url.as_str()],
+            ActionSpec::OpenUrl { url, .. } => vec![url.as_str()],
             ActionSpec::Media { level: Some(l), .. } => vec![l.as_str()],
             ActionSpec::LaunchApp { args, .. } | ActionSpec::RunScript { args, .. } => {
                 args.iter().map(String::as_str).collect()
@@ -219,9 +257,22 @@ impl ActionSpec {
     pub fn pack_files(&self) -> Vec<&Path> {
         match self {
             ActionSpec::RunScript { path, .. } => vec![path.as_path()],
-            ActionSpec::Say { file: Some(f), .. } => vec![f.as_path()],
+            ActionSpec::Say { file: Some(f), .. } | ActionSpec::Ask { file: f, .. } => {
+                vec![f.as_path()]
+            }
             ActionSpec::Sequence { steps } => {
                 steps.iter().flat_map(ActionSpec::pack_files).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Команды, которые может выполнить ответ на вопрос (`ask`).
+    pub fn ask_targets(&self) -> Vec<&str> {
+        match self {
+            ActionSpec::Ask { choices, .. } => choices.values().map(String::as_str).collect(),
+            ActionSpec::Sequence { steps } => {
+                steps.iter().flat_map(ActionSpec::ask_targets).collect()
             }
             _ => Vec::new(),
         }
@@ -231,7 +282,10 @@ impl ActionSpec {
     pub fn with_slots(&self, values: &crate::slots::SlotValues) -> ActionSpec {
         let fill = |s: &String| crate::slots::fill(s, values);
         match self {
-            ActionSpec::OpenUrl { url } => ActionSpec::OpenUrl { url: fill(url) },
+            ActionSpec::OpenUrl { url, find_tab } => ActionSpec::OpenUrl {
+                url: fill(url),
+                find_tab: find_tab.clone(),
+            },
             ActionSpec::Media {
                 operation,
                 steps,
@@ -347,7 +401,34 @@ impl Registry {
             }
         }
         registry.find_conflicts();
+        registry.check_ask_targets();
         registry
+    }
+
+    /// Ответ на вопрос (`ask`) должен вести к существующей команде — иначе
+    /// команда с вопросом пропускается.
+    fn check_ask_targets(&mut self) {
+        let ids: HashSet<String> = self.commands.iter().map(|c| c.id.clone()).collect();
+        let mut broken = Vec::new();
+        for command in &self.commands {
+            if let Some(missing) = command
+                .action
+                .ask_targets()
+                .into_iter()
+                .find(|t| !ids.contains(*t))
+            {
+                broken.push((command.id.clone(), command.dir.clone(), missing.to_owned()));
+            }
+        }
+        for (id, dir, missing) in broken {
+            self.commands.retain(|c| c.id != id);
+            self.errors.push(LoadProblem {
+                file: dir.join(MANIFEST_FILE),
+                message: format!(
+                    "команда `{id}` пропущена: ответ ведёт к несуществующей команде `{missing}`"
+                ),
+            });
+        }
     }
 
     /// Добавляет один манифест (путь — для сообщений и относительных путей).
@@ -536,7 +617,23 @@ fn validate_action(
                 Ok(())
             }
         },
-        ActionSpec::OpenUrl { url } => validate_url(url),
+        ActionSpec::OpenUrl { url, find_tab } => {
+            validate_url(url)?;
+            if find_tab.len() > MAX_TAB_PATTERNS {
+                return Err(format!(
+                    "open_url: в find_tab больше {MAX_TAB_PATTERNS} шаблонов"
+                ));
+            }
+            if let Some(bad) = find_tab
+                .iter()
+                .find(|p| p.trim().chars().all(|c| c == '*' || c.is_whitespace()))
+            {
+                return Err(format!(
+                    "open_url: шаблон вкладки «{bad}» подходит к любой вкладке"
+                ));
+            }
+            Ok(())
+        }
         ActionSpec::Media {
             operation,
             steps,
@@ -679,10 +776,78 @@ fn validate_action(
             for (i, step) in steps.iter().enumerate() {
                 validate_action(step, dir, slots, true)
                     .map_err(|e| format!("шаг {}: {e}", i + 1))?;
+                // После вопроса цепочка не продолжается: дальше решает ответ.
+                if matches!(step, ActionSpec::Ask { .. }) && i + 1 != steps.len() {
+                    return Err(format!("шаг {}: ask — только последним шагом", i + 1));
+                }
+            }
+            Ok(())
+        }
+        ActionSpec::WaitProcess { name, timeout_sec } => {
+            let trimmed = name.trim();
+            let plain_name = !trimmed.is_empty()
+                && !trimmed.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']);
+            if !plain_name || !trimmed.to_ascii_lowercase().ends_with(".exe") {
+                return Err(format!(
+                    "wait_process: name = «{name}» — нужно имя файла программы, например faceitclient.exe"
+                ));
+            }
+            if !(1..=MAX_PROCESS_WAIT_SEC).contains(timeout_sec) {
+                return Err(format!(
+                    "wait_process: timeout_sec = {timeout_sec} вне диапазона 1–{MAX_PROCESS_WAIT_SEC}"
+                ));
+            }
+            Ok(())
+        }
+        ActionSpec::Ask { file, choices } => {
+            let path = inside_dir(dir, file)?;
+            if !path.is_file() {
+                return Err(format!("ask: файла {} нет", path.display()));
+            }
+            if !(1..=MAX_ASK_CHOICES).contains(&choices.len()) {
+                return Err(format!("ask: от 1 до {MAX_ASK_CHOICES} вариантов ответа"));
+            }
+            for (answer, id) in choices {
+                if jarvis_nlu::normalize(answer).is_empty() {
+                    return Err(format!("ask: ответ «{answer}» после нормализации пустой"));
+                }
+                if id.is_empty()
+                    || !id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    return Err(format!("ask: «{answer}» ведёт к недопустимому id `{id}`"));
+                }
             }
             Ok(())
         }
     }
+}
+
+/// Подходит ли заголовок вкладки к шаблону: `*` — любые символы, регистр
+/// не важен, остальное — буквально и целиком («* - YouTube», «Google Календарь*»).
+pub fn title_matches(pattern: &str, title: &str) -> bool {
+    let pattern: Vec<char> = pattern.trim().to_lowercase().chars().collect();
+    let title: Vec<char> = title.trim().to_lowercase().chars().collect();
+    // Классический жадный разбор со звёздочкой и возвратом.
+    let (mut p, mut t) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while t < title.len() {
+        if p < pattern.len() && pattern[p] == '*' {
+            star = Some((p, t));
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == title[t] {
+            p += 1;
+            t += 1;
+        } else if let Some((sp, st)) = star {
+            p = sp + 1;
+            t = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|c| *c == '*')
 }
 
 /// Спецсимволы cmd.exe, недопустимые в аргументах .bat/.cmd.
@@ -825,7 +990,8 @@ operation = "next"
         assert_eq!(
             yt.action,
             ActionSpec::OpenUrl {
-                url: "https://www.youtube.com".into()
+                url: "https://www.youtube.com".into(),
+                find_tab: Vec::new(),
             }
         );
         assert_eq!(r.get("next").unwrap().reply, ReplyChoice::Silent);
@@ -1218,7 +1384,8 @@ operation = "next"
         assert_eq!(
             r.commands[0].action.with_slots(&values),
             ActionSpec::OpenUrl {
-                url: "https://youtube.com".into()
+                url: "https://youtube.com".into(),
+                find_tab: Vec::new(),
             }
         );
     }
@@ -1242,6 +1409,101 @@ operation = "next"
                 "type = \"system_power\"\noperation = \"explode\"",
             ),
             "explode",
+        );
+    }
+
+    #[test]
+    fn tab_title_patterns() {
+        assert!(title_matches("* - YouTube", "(96) МЕНТАЛИСТ - YouTube"));
+        assert!(title_matches("youtube", "YouTube"));
+        assert!(!title_matches("* - YouTube", "YouTube Music"));
+        assert!(!title_matches("YouTube", "YouTube Music"));
+        assert!(title_matches(
+            "Google Календарь*",
+            "Google Календарь – неделя"
+        ));
+        assert!(title_matches("*a*b*", "xaYYbZ"));
+        assert!(!title_matches("*a*b", "xaYYbZ"));
+        assert!(title_matches("*", ""));
+    }
+
+    fn manifest_with(action: &str) -> Registry {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("q.wav"), b"RIFF").unwrap();
+        let text = format!(
+            "pack = \"t\"\nversion = 1\n[[command]]\nid = \"a\"\nphrases = [\"запусти игровой режим\"]\n\
+             description = \"x\"\n{action}\n\
+             [[command]]\nid = \"game_cs2\"\nphrases = [\"запусти кс\"]\ndescription = \"y\"\n\
+             [command.action]\ntype = \"wait\"\nms = 1\n"
+        );
+        let mut r = Registry::default();
+        r.add_manifest(&dir.path().join(MANIFEST_FILE), &text);
+        r.check_ask_targets();
+        r
+    }
+
+    #[test]
+    fn ask_and_wait_process_are_validated() {
+        let ok = manifest_with(
+            "[command.action]\ntype = \"sequence\"\n\
+             [[command.action.steps]]\ntype = \"wait_process\"\nname = \"steam.exe\"\ntimeout_sec = 60\n\
+             [[command.action.steps]]\ntype = \"ask\"\nfile = \"q.wav\"\nchoices = { \"кс\" = \"game_cs2\" }\n",
+        );
+        assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+        assert_eq!(ok.get("a").unwrap().action.ask_targets(), ["game_cs2"]);
+
+        let not_last = manifest_with(
+            "[command.action]\ntype = \"sequence\"\n\
+             [[command.action.steps]]\ntype = \"ask\"\nfile = \"q.wav\"\nchoices = { \"кс\" = \"game_cs2\" }\n\
+             [[command.action.steps]]\ntype = \"wait\"\nms = 1\n",
+        );
+        assert!(
+            not_last.errors[0].message.contains("последним"),
+            "{:?}",
+            not_last.errors
+        );
+
+        let unknown = manifest_with(
+            "[command.action]\ntype = \"ask\"\nfile = \"q.wav\"\nchoices = { \"кс\" = \"nope\" }\n",
+        );
+        assert!(unknown.get("a").is_none());
+        assert!(
+            unknown.errors[0].message.contains("nope"),
+            "{:?}",
+            unknown.errors
+        );
+
+        for bad in [
+            "name = \"C:\\\\x\\\\steam.exe\"\ntimeout_sec = 5",
+            "name = \"steam\"\ntimeout_sec = 5",
+            "name = \"steam.exe\"\ntimeout_sec = 0",
+            "name = \"steam.exe\"\ntimeout_sec = 9999",
+        ] {
+            let r = manifest_with(&format!(
+                "[command.action]\ntype = \"wait_process\"\n{bad}\n"
+            ));
+            assert!(!r.errors.is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn find_tab_is_optional_and_checked() {
+        let ok = manifest_with(
+            "[command.action]\ntype = \"open_url\"\nurl = \"https://youtube.com\"\nfind_tab = [\"* - YouTube\"]\n",
+        );
+        assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+        let any = manifest_with(
+            "[command.action]\ntype = \"open_url\"\nurl = \"https://youtube.com\"\nfind_tab = [\" * \"]\n",
+        );
+        assert!(!any.errors.is_empty());
+        // Без find_tab отпечаток прежний — сохранённые разрешения не слетают.
+        let plain = ActionSpec::OpenUrl {
+            url: "https://youtube.com".into(),
+            find_tab: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"type":"open_url","url":"https://youtube.com"}"#
         );
     }
 }

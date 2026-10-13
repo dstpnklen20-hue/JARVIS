@@ -10,13 +10,16 @@ publish.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# windows (типизированный COM) — только для громкости (Core Audio API);
-# версия та же, что уже тянет cpal.
+# windows (типизированный COM) — громкость (Core Audio API) и вкладки
+# браузера (UI Automation); версия та же, что уже тянет cpal.
 windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Accessibility",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
 windows-sys = { workspace = true, features = [
@@ -24,6 +27,7 @@ windows-sys = { workspace = true, features = [
     "Win32_Globalization",
     "Win32_Security",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_Power",
     "Win32_System_Registry",
