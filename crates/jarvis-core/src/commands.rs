@@ -734,7 +734,7 @@ fn validate_level(level: &str, slots: &BTreeMap<String, SlotSpec>) -> Result<(),
             _ => Err(format!("media: level = «{level}» — нужно число 0–100")),
         },
         [name] if level.trim() == format!("{{{name}}}") => match slots.get(*name) {
-            Some(SlotSpec::Number { min, max }) if *min >= 0 && *max <= 100 => Ok(()),
+            Some(SlotSpec::Number { min, max, .. }) if *min >= 0 && *max <= 100 => Ok(()),
             Some(SlotSpec::Number { .. }) => {
                 Err(format!("media: слот `{name}` должен быть в пределах 0–100"))
             }

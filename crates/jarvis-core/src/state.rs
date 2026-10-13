@@ -14,7 +14,14 @@
 //!            └─────────────────────┴──────────────── тайм-аут ──────────────────┘
 //! ```
 //!
-//! Аварийная остановка из любого состояния → PAUSED. GAME_MODE — этап 6.
+//! Диалог после «Джарвис» (ожидание — `wake.listen_secs` после ответа «Да, сэр»):
+//! понял фразу — выполняет; услышал, но не понял — «Не понял, сэр» и ждёт
+//! повтора; ничего не услышал — «Не расслышал, сэр» и возвращается в IDLE.
+//!
+//! Аварийная остановка горячей клавишей из любого состояния → PAUSED
+//! (микрофон выключен, вернуть — пункт «Пауза» в трее). «Джарвис, стоп»
+//! голосом останавливает то же самое, но микрофон не выключает → IDLE:
+//! иначе голосом из паузы не выйти. GAME_MODE — этап 6.
 
 use std::time::{Duration, Instant};
 
@@ -24,8 +31,9 @@ pub enum State {
     Paused,
     /// Ждём «Джарвис».
     Idle,
-    /// Услышали «Джарвис», ждём команду до `until`.
-    Listening { until: Instant },
+    /// Услышали «Джарвис», ждём команду до `until`. `retry` — уже
+    /// переспросили («Не понял, сэр»): тишина после этого — молча в IDLE.
+    Listening { until: Instant, retry: bool },
     /// Выполняется команда.
     Executing,
     /// После команды ещё ждём следующую без «Джарвис» до `until`.
@@ -53,10 +61,14 @@ pub enum Event {
     PermissionGranted(String),
     /// Пользователь отказал («нет» или «никогда»).
     PermissionDenied,
-    /// Горячая клавиша или «Джарвис, стоп».
+    /// Горячая клавиша аварийной остановки: всё остановить и выключить микрофон.
     EmergencyStop,
+    /// «Джарвис, стоп» голосом: всё остановить, но слушать дальше.
+    VoiceStop,
     /// Фраза не похожа ни на одну команду.
     NotUnderstood,
+    /// Команда узнана, но число в ней вне допустимого диапазона.
+    InvalidValue,
     /// Команда выполнена; `reply` — что сказать (уже выбрано ядром:
     /// ответ команды при успехе, «не удалось» при ошибке, ничего для `say`).
     ActionFinished {
@@ -90,16 +102,22 @@ pub enum Reply {
     Ask,
     /// «Как скажете, сэр» — после отказа.
     Denied,
+    /// «Не расслышал, сэр» — после «Джарвис» команды не прозвучало.
+    NotHeard,
+    /// «Такое значение недопустимо, сэр» — число вне диапазона команды.
+    OutOfRange,
 }
 
 impl Reply {
-    pub const ALL: [Reply; 6] = [
+    pub const ALL: [Reply; 8] = [
         Reply::Wake,
         Reply::Done,
         Reply::NotUnderstood,
         Reply::Failed,
         Reply::Ask,
         Reply::Denied,
+        Reply::NotHeard,
+        Reply::OutOfRange,
     ];
 
     /// Ключ в `pack.toml` звукового пакета и в `reply` манифеста команды.
@@ -111,6 +129,17 @@ impl Reply {
             Reply::Failed => "failed",
             Reply::Ask => "ask",
             Reply::Denied => "denied",
+            Reply::NotHeard => "not_heard",
+            Reply::OutOfRange => "out_of_range",
+        }
+    }
+
+    /// Чем заменить ответ, которого нет в звуковом пакете (старые пакеты
+    /// не знают новых ответов).
+    pub fn fallback(self) -> Option<Reply> {
+        match self {
+            Reply::OutOfRange => Some(Reply::NotUnderstood),
+            _ => None,
         }
     }
 }
@@ -172,8 +201,9 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
     use Event as E;
     use State as S;
 
-    let listening = || S::Listening {
+    let listening = |retry| S::Listening {
         until: now + timings.listen,
+        retry,
     };
 
     // Уходя из вопроса-разрешения, окно надо убрать.
@@ -196,6 +226,12 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
                 Effect::SetListening(false),
             ]),
         ),
+        // Голосом: то же, но микрофон остаётся включённым — «Джарвис» снова работает.
+        (S::Paused, E::VoiceStop) => Transition::stay(S::Paused),
+        (_, E::VoiceStop) => Transition::to(
+            S::Idle,
+            with_close(vec![Effect::StopAll, Effect::SetTranscribing(false)]),
+        ),
 
         // --- пауза: из любого активного состояния ---
         (S::Paused, E::Resume | E::TogglePause) => {
@@ -216,14 +252,16 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         (S::AskingPermission { until }, E::Spoke(d)) => {
             Transition::stay(S::AskingPermission { until: until + d })
         }
-        (S::Listening { until }, E::Spoke(d)) => {
-            Transition::stay(S::Listening { until: until + d })
-        }
+        (S::Listening { until, retry }, E::Spoke(d)) => Transition::stay(S::Listening {
+            until: until + d,
+            retry,
+        }),
         (S::FollowUp { until }, E::Spoke(d)) => Transition::stay(S::FollowUp { until: until + d }),
         (_, E::Spoke(_)) => Transition::stay(state),
         // Человек ещё говорит — не обрывать фразу на середине по таймеру.
-        (S::Listening { until }, E::UserSpeaking) => Transition::stay(S::Listening {
+        (S::Listening { until, retry }, E::UserSpeaking) => Transition::stay(S::Listening {
             until: until.max(now + SPEAKING_GRACE),
+            retry,
         }),
         (S::FollowUp { until }, E::UserSpeaking) => Transition::stay(S::FollowUp {
             until: until.max(now + SPEAKING_GRACE),
@@ -259,12 +297,12 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
 
         // --- слово активации ---
         (S::Idle | S::FollowUp { .. }, E::WakeWord) => {
-            Transition::to(listening(), vec![Effect::PlayReply(Reply::Wake)])
+            Transition::to(listening(false), vec![Effect::PlayReply(Reply::Wake)])
         }
         // Повторное «Джарвис» во время ожидания команды: ответить снова и
         // ждать команду заново — человек проверяет, слышат ли его.
         (S::Listening { .. }, E::WakeWord) => {
-            Transition::to(listening(), vec![Effect::PlayReply(Reply::Wake)])
+            Transition::to(listening(false), vec![Effect::PlayReply(Reply::Wake)])
         }
         (S::Executing, E::WakeWord) => Transition::stay(S::Executing),
 
@@ -274,10 +312,17 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         }
         // После «Джарвис» непонятная фраза — переспросить; в FOLLOW_UP это
         // скорее посторонний разговор — молчим.
-        (S::Listening { .. }, E::NotUnderstood) => {
-            Transition::to(listening(), vec![Effect::PlayReply(Reply::NotUnderstood)])
-        }
+        (S::Listening { .. }, E::NotUnderstood) => Transition::to(
+            listening(true),
+            vec![Effect::PlayReply(Reply::NotUnderstood)],
+        ),
         (S::FollowUp { .. } | S::Idle | S::Executing, E::NotUnderstood) => Transition::stay(state),
+        // Команда узнана уверенно (и в FOLLOW_UP тоже), но значение недопустимо —
+        // сказать об этом и ждать исправленную фразу.
+        (S::Listening { .. } | S::FollowUp { .. }, E::InvalidValue) => {
+            Transition::to(listening(true), vec![Effect::PlayReply(Reply::OutOfRange)])
+        }
+        (S::Idle | S::Executing, E::InvalidValue) => Transition::stay(state),
         // Команда без «Джарвис» в ожидании и вторая команда во время первой — игнор.
         (S::Idle | S::Executing, E::Command(_)) => Transition::stay(state),
 
@@ -291,7 +336,15 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         (_, E::ActionFinished { .. }) => Transition::stay(state),
 
         // --- таймауты ---
-        (S::Listening { until } | S::FollowUp { until }, E::Tick) if now >= until => {
+        // После «Джарвис» ничего не прозвучало — сказать об этом.
+        (S::Listening { until, retry }, E::Tick) if now >= until => {
+            let mut effects = vec![Effect::SetTranscribing(false)];
+            if !retry {
+                effects.insert(0, Effect::PlayReply(Reply::NotHeard));
+            }
+            Transition::to(S::Idle, effects)
+        }
+        (S::FollowUp { until }, E::Tick) if now >= until => {
             Transition::to(S::Idle, vec![Effect::SetTranscribing(false)])
         }
         (_, E::Tick) => Transition::stay(state),
@@ -318,6 +371,7 @@ mod tests {
         for state in [
             State::Listening {
                 until: t0 + T.listen,
+                retry: false,
             },
             State::FollowUp {
                 until: t0 + T.follow_up,
@@ -410,11 +464,13 @@ mod tests {
         );
         let listening = State::Listening {
             until: t0 + T.listen,
+            retry: false,
         };
         assert_eq!(
             transition(listening, Event::Spoke(d), t0, T),
             Transition::stay(State::Listening {
-                until: t0 + T.listen + d
+                until: t0 + T.listen + d,
+                retry: false,
             })
         );
         for state in [State::Idle, State::Executing, State::Paused] {
@@ -492,6 +548,7 @@ mod tests {
             State::Idle,
             State::Listening {
                 until: t0 + T.listen,
+                retry: false,
             },
             State::Executing,
             State::FollowUp {
@@ -507,7 +564,8 @@ mod tests {
         assert_eq!(
             tr.next,
             State::Listening {
-                until: t0 + T.listen
+                until: t0 + T.listen,
+                retry: false,
             }
         );
         assert_eq!(tr.effects, [Effect::PlayReply(Reply::Wake)]);
@@ -517,11 +575,20 @@ mod tests {
     fn repeated_wake_answers_again_and_restarts_waiting() {
         let t0 = now();
         let later = t0 + Duration::from_secs(2);
-        let tr = transition(State::Listening { until: t0 }, Event::WakeWord, later, T);
+        let tr = transition(
+            State::Listening {
+                until: t0,
+                retry: false,
+            },
+            Event::WakeWord,
+            later,
+            T,
+        );
         assert_eq!(
             tr.next,
             State::Listening {
-                until: later + T.listen
+                until: later + T.listen,
+                retry: false,
             }
         );
         assert_eq!(tr.effects, [Effect::PlayReply(Reply::Wake)]);
@@ -533,18 +600,21 @@ mod tests {
         // Ожидание почти кончилось, а человек ещё говорит.
         let listening = State::Listening {
             until: t0 + Duration::from_millis(300),
+            retry: false,
         };
         let tr = transition(listening, Event::UserSpeaking, t0, T);
         assert_eq!(
             tr.next,
             State::Listening {
-                until: t0 + SPEAKING_GRACE
+                until: t0 + SPEAKING_GRACE,
+                retry: false,
             }
         );
         assert!(tr.effects.is_empty());
         // Запас больше оставшегося времени — ничего не укорачивается.
         let long = State::Listening {
             until: t0 + Duration::from_secs(5),
+            retry: false,
         };
         assert_eq!(
             transition(long, Event::UserSpeaking, t0, T),
@@ -565,7 +635,8 @@ mod tests {
         assert_eq!(
             tr.next,
             State::Listening {
-                until: t0 + T.listen
+                until: t0 + T.listen,
+                retry: false,
             }
         );
         assert_eq!(tr.effects, [Effect::PlayReply(Reply::Wake)]);
@@ -577,6 +648,7 @@ mod tests {
         for state in [
             State::Listening {
                 until: t0 + T.listen,
+                retry: false,
             },
             State::FollowUp {
                 until: t0 + T.follow_up,
@@ -646,11 +718,20 @@ mod tests {
     #[test]
     fn not_understood_answers_only_after_wake_word() {
         let t0 = now();
-        let tr = transition(State::Listening { until: t0 }, Event::NotUnderstood, t0, T);
+        let tr = transition(
+            State::Listening {
+                until: t0,
+                retry: false,
+            },
+            Event::NotUnderstood,
+            t0,
+            T,
+        );
         assert_eq!(
             tr.next,
             State::Listening {
-                until: t0 + T.listen
+                until: t0 + T.listen,
+                retry: true,
             }
         );
         assert_eq!(tr.effects, [Effect::PlayReply(Reply::NotUnderstood)]);
@@ -670,21 +751,154 @@ mod tests {
     #[test]
     fn listening_and_follow_up_time_out_to_idle() {
         let t0 = now();
-        for state in [
-            State::Listening {
-                until: t0 + T.listen,
-            },
-            State::FollowUp {
-                until: t0 + T.listen,
-            },
-        ] {
+        let cases = [
+            // Ничего не сказали после «Джарвис» — «Не расслышал, сэр».
+            (
+                State::Listening {
+                    until: t0 + T.listen,
+                    retry: false,
+                },
+                vec![
+                    Effect::PlayReply(Reply::NotHeard),
+                    Effect::SetTranscribing(false),
+                ],
+            ),
+            // Уже переспросили — после этого тишина молча.
+            (
+                State::Listening {
+                    until: t0 + T.listen,
+                    retry: true,
+                },
+                vec![Effect::SetTranscribing(false)],
+            ),
+            // После выполненной команды — молча.
+            (
+                State::FollowUp {
+                    until: t0 + T.listen,
+                },
+                vec![Effect::SetTranscribing(false)],
+            ),
+        ];
+        for (state, effects) in cases {
             assert_eq!(
                 transition(state, Event::Tick, t0, T),
                 Transition::stay(state)
             );
             let tr = transition(state, Event::Tick, t0 + T.listen, T);
             assert_eq!(tr.next, State::Idle, "{state:?}");
-            assert_eq!(tr.effects, [Effect::SetTranscribing(false)]);
+            assert_eq!(tr.effects, effects, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn dialog_wake_then_silence_says_not_heard() {
+        // «Джарвис» → «Да, сэр» (1 с) → 2 с тишины → «Не расслышал, сэр».
+        let timings = Timings {
+            listen: Duration::from_secs(2),
+            ..T
+        };
+        let t0 = now();
+        let tr = transition(State::Idle, Event::WakeWord, t0, timings);
+        let tr = transition(tr.next, Event::Spoke(Duration::from_secs(1)), t0, timings);
+        let at_2s = transition(tr.next, Event::Tick, t0 + Duration::from_secs(2), timings);
+        assert_eq!(
+            at_2s,
+            Transition::stay(tr.next),
+            "«Да, сэр» не съедает ожидание"
+        );
+        let at_3s = transition(tr.next, Event::Tick, t0 + Duration::from_secs(3), timings);
+        assert_eq!(at_3s.next, State::Idle);
+        assert_eq!(at_3s.effects[0], Effect::PlayReply(Reply::NotHeard));
+    }
+
+    #[test]
+    fn dialog_not_understood_then_command_executes() {
+        let t0 = now();
+        let tr = transition(State::Idle, Event::WakeWord, t0, T);
+        let tr = transition(tr.next, Event::NotUnderstood, t0, T);
+        assert_eq!(tr.effects, [Effect::PlayReply(Reply::NotUnderstood)]);
+        let tr = transition(tr.next, cmd("open_youtube"), t0, T);
+        assert_eq!(tr.next, State::Executing);
+        assert_eq!(tr.effects, [Effect::Execute("open_youtube".into())]);
+    }
+
+    #[test]
+    fn repeated_wake_after_retry_expects_answer_again() {
+        let t0 = now();
+        let retry = State::Listening {
+            until: t0,
+            retry: true,
+        };
+        let tr = transition(retry, Event::WakeWord, t0, T);
+        assert_eq!(
+            tr.next,
+            State::Listening {
+                until: t0 + T.listen,
+                retry: false
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_value_explains_and_waits_for_correction() {
+        let t0 = now();
+        for state in [
+            State::Listening {
+                until: t0,
+                retry: false,
+            },
+            State::FollowUp { until: t0 },
+        ] {
+            let tr = transition(state, Event::InvalidValue, t0, T);
+            assert_eq!(
+                tr.next,
+                State::Listening {
+                    until: t0 + T.listen,
+                    retry: true
+                },
+                "{state:?}"
+            );
+            assert_eq!(tr.effects, [Effect::PlayReply(Reply::OutOfRange)]);
+        }
+        for state in [State::Idle, State::Executing, State::Paused, asking(t0)] {
+            assert_eq!(
+                transition(state, Event::InvalidValue, t0, T),
+                Transition::stay(state),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn voice_stop_stops_everything_but_keeps_listening() {
+        let t0 = now();
+        for state in all_states(t0).into_iter().chain([asking(t0)]) {
+            let tr = transition(state, Event::VoiceStop, t0, T);
+            if state == State::Paused {
+                assert_eq!(tr, Transition::stay(State::Paused));
+                continue;
+            }
+            assert_eq!(tr.next, State::Idle, "{state:?}");
+            let mut expected = vec![Effect::StopAll, Effect::SetTranscribing(false)];
+            if matches!(state, State::AskingPermission { .. }) {
+                expected.insert(0, Effect::CloseAsk);
+            }
+            assert_eq!(tr.effects, expected, "{state:?}");
+            assert!(
+                !tr.effects.contains(&Effect::SetListening(false)),
+                "микрофон не выключается"
+            );
+            // И после этого «Джарвис» снова работает.
+            let again = transition(tr.next, Event::WakeWord, t0, T);
+            assert_eq!(again.effects, [Effect::PlayReply(Reply::Wake)]);
+        }
+    }
+
+    #[test]
+    fn only_out_of_range_has_a_fallback() {
+        for reply in Reply::ALL {
+            let expected = (reply == Reply::OutOfRange).then_some(Reply::NotUnderstood);
+            assert_eq!(reply.fallback(), expected, "{reply:?}");
         }
     }
 

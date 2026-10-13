@@ -267,3 +267,52 @@ fn voiceprint_accepts_same_voice_and_rejects_other() {
         print.threshold
     );
 }
+
+/// Ожидание команды после «Джарвис» — 2 с. Детектор речи должен замечать
+/// голос раньше, чем появятся первые распознанные слова: иначе фраза,
+/// начатая к концу ожидания, оборвётся «Не расслышал, сэр».
+#[test]
+#[ignore = "нужны модели: scripts/download-models.ps1"]
+fn vad_notices_speech_before_first_words() {
+    use jarvis_audio::stt::{SherpaStt, SpeechToText};
+
+    let (config, models) = setup();
+    let lead = 0.5_f32;
+    let chunk = MODEL_RATE as usize / 50; // 20 мс, как в конвейере
+    let mut gains = Vec::new();
+    for path in fixtures("commands") {
+        let mut vad = Vad::new(&models.vad, VadSettings::default()).unwrap();
+        let end_silence = config.listen.end_silence_ms as f32 / 1000.0;
+        let mut stt = SherpaStt::new(&models.asr, end_silence, None).unwrap();
+        let mut samples = vec![0.0; (lead * MODEL_RATE as f32) as usize];
+        samples.extend(load16(&path));
+        samples.extend(vec![0.0; MODEL_RATE as usize]);
+        let (mut voice_at, mut words_at) = (None, None);
+        for (i, part) in samples.chunks(chunk).enumerate() {
+            let t = (i + 1) as f32 * 0.02;
+            let _ = vad.accept(part);
+            if voice_at.is_none() && vad.speaking() {
+                voice_at = Some(t);
+            }
+            if words_at.is_none() && stt.accept(part).is_some() {
+                words_at = Some(t);
+            }
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let voice = voice_at.unwrap_or_else(|| panic!("{name}: речь не замечена"));
+        let words = words_at.unwrap_or(f32::INFINITY);
+        eprintln!(
+            "{name}: голос через {:.2} с от начала записи, первые слова через {:.2} с",
+            voice - lead,
+            words - lead
+        );
+        assert!(voice <= words + 0.05, "{name}: детектор позже слов");
+        gains.push(words - voice);
+    }
+    gains.sort_by(f32::total_cmp);
+    eprintln!(
+        "детектор раньше слов: медиана {:.2} с, минимум {:.2} с",
+        gains[gains.len() / 2],
+        gains[0]
+    );
+}

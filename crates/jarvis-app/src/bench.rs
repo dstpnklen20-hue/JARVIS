@@ -186,6 +186,7 @@ fn bench_commands(
             Resolution::Command { id, .. } => id.clone(),
             Resolution::NotUnderstood { .. } => "не понял".into(),
             Resolution::Ambiguous { .. } => "переспросить".into(),
+            Resolution::OutOfRange { .. } => "вне диапазона".into(),
             Resolution::Empty => "—".into(),
         };
         let correct = if expected.starts_with("unknown") {

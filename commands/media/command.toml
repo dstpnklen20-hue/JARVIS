@@ -59,6 +59,8 @@ reply = "none"
 type = "number"
 min = 0
 max = 100
+# «громкость на 120» — поставить 100, а не отказать.
+clamp = true
 [command.action]
 type = "media"
 operation = "volume_set"

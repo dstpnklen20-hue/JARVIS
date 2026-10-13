@@ -30,6 +30,11 @@ pub enum Resolution {
     NotUnderstood {
         best: Option<(String, f32)>,
     },
+    /// Команда узнана, но число в ней вне допустимого диапазона
+    /// («громкость на 500» у слота без `clamp`).
+    OutOfRange {
+        id: String,
+    },
     /// После удаления слова активации ничего не осталось («Джарвис.»).
     Empty,
 }
@@ -56,7 +61,7 @@ pub struct CommandResolver {
 }
 
 /// Сходство, при котором частичный текст считается точной фразой команды.
-const EXACT_SCORE: f32 = 0.99;
+pub const EXACT_SCORE: f32 = 0.99;
 
 /// Встроенные команды Джарвиса. Двоеточие в id запрещено в манифестах —
 /// пакет команд не может подменить встроенную команду.
@@ -112,9 +117,11 @@ pub fn spoken_phrase(registry: &Registry, id: &str) -> String {
 
 fn slot_kind(spec: &SlotSpec) -> SlotKind {
     match spec {
-        SlotSpec::Number { min, max } => SlotKind::Number {
-            min: *min,
-            max: *max,
+        // Сопоставление ловит любое число: вне диапазона — не «не понял»,
+        // а прижать к границе или отказать (решает `accept_slots`).
+        SlotSpec::Number { .. } => SlotKind::Number {
+            min: i64::MIN,
+            max: i64::MAX,
         },
         SlotSpec::Choice { values } => {
             SlotKind::Choice(values.spoken().into_iter().map(str::to_owned).collect())
@@ -198,6 +205,9 @@ impl CommandResolver {
                     score: c.score,
                     slots,
                 },
+                None if self.out_of_range(c.command, &c.slots) => {
+                    Resolution::OutOfRange { id: id(c.command) }
+                }
                 None => Resolution::NotUnderstood {
                     best: Some((id(c.command), c.score)),
                 },
@@ -221,6 +231,14 @@ impl CommandResolver {
                 Some((name.clone(), accepted))
             })
             .collect()
+    }
+
+    fn out_of_range(&self, command: usize, raw: &[(String, String)]) -> bool {
+        let Some(specs) = self.slot_specs.get(command) else {
+            return false;
+        };
+        raw.iter()
+            .any(|(name, value)| specs.get(name).is_some_and(|s| s.out_of_range(value)))
     }
 }
 
@@ -473,6 +491,61 @@ mod tests {
         assert_eq!(id("забудь разрешения"), BUILTIN_FORGET_PERMISSIONS);
         assert!(is_builtin(BUILTIN_STOP));
         assert!(!is_builtin("open_youtube"));
+    }
+
+    #[test]
+    fn volume_above_maximum_is_clamped() {
+        for text in [
+            "поставь громкость на сто двадцать",
+            "сделай громкость двести",
+        ] {
+            match resolver().resolve(text) {
+                Resolution::Command { id, slots, .. } => {
+                    assert_eq!(id, "media_volume_set", "{text}");
+                    assert_eq!(slots.get("level").map(String::as_str), Some("100"));
+                }
+                other => panic!("«{text}»: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn number_out_of_range_without_clamp_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("t");
+        std::fs::create_dir(&pack).unwrap();
+        std::fs::write(
+            pack.join("command.toml"),
+            "pack = \"t\"
+version = 1
+[[command]]
+id = \"brightness\"
+             phrases = [\"яркость на {level}\"]
+description = \"яркость\"
+             [command.slots.level]
+type = \"number\"
+min = 10
+max = 90
+             [command.action]
+type = \"media\"
+operation = \"volume_set\"
+level = \"{level}\"
+",
+        )
+        .unwrap();
+        let registry = Registry::load(dir.path());
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+        let r = CommandResolver::new(&registry, WakeMatcher::new(["джарвис"], 1), &nlu());
+        assert_eq!(
+            r.resolve("яркость на сто двадцать"),
+            Resolution::OutOfRange {
+                id: "brightness".into()
+            }
+        );
+        assert!(matches!(
+            r.resolve("яркость на пятьдесят"),
+            Resolution::Command { .. }
+        ));
     }
 
     #[test]

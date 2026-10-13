@@ -12,7 +12,7 @@ use anyhow::Context as _;
 use jarvis_actions::{ActionError, CancelToken, Outcome, Sound, System};
 use jarvis_app::resolver::{
     BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS, BUILTIN_STOP, CommandResolver,
-    EarlyDecider, Resolution, hotword_phrases, is_builtin, spoken_phrase,
+    EXACT_SCORE, EarlyDecider, Resolution, hotword_phrases, is_builtin, spoken_phrase,
 };
 use jarvis_app::speech::{self, Speech, SpeechEvent};
 use jarvis_app::system::PlatformSystem;
@@ -105,6 +105,25 @@ enum Purpose {
     Clarify,
     /// Предупреждение без ожидания ответа.
     Notice,
+}
+
+/// Откуда аварийная остановка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// Горячая клавиша: всё остановить и выключить микрофон (пауза).
+    Hotkey,
+    /// «Джарвис, стоп»: всё остановить, но слушать дальше — иначе голосом
+    /// из паузы не выйти, и Джарвис «глохнет» до перезапуска.
+    Voice,
+}
+
+impl Stop {
+    fn source(self) -> &'static str {
+        match self {
+            Stop::Hotkey => "горячая клавиша",
+            Stop::Voice => "голос",
+        }
+    }
 }
 
 /// Что услышали — для журнала и подстановки слотов.
@@ -298,7 +317,7 @@ impl Core {
             match rx.recv_timeout(CORE_TICK) {
                 Ok(CoreMsg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(CoreMsg::TogglePause) => self.apply(Event::TogglePause),
-                Ok(CoreMsg::EmergencyStop) => self.emergency_stop("горячая клавиша"),
+                Ok(CoreMsg::EmergencyStop) => self.emergency_stop(Stop::Hotkey),
                 Ok(CoreMsg::ForgetPermissions) => self.forget_permissions("трей"),
                 Ok(CoreMsg::ReloadCommands) => {
                     let ok = self.reload_commands("трей");
@@ -388,6 +407,13 @@ impl Core {
             }
             PipelineEvent::Wake(wake) => self.on_wake(wake),
             PipelineEvent::Transcript(t) => self.on_transcript(t),
+            // Человек начал говорить — ожидание команды не обрывается, пока
+            // слова ещё не распознаны.
+            PipelineEvent::Voice => {
+                if self.state.accepts_commands() {
+                    self.apply(Event::UserSpeaking);
+                }
+            }
             PipelineEvent::Rejected {
                 heard,
                 similarity,
@@ -441,8 +467,12 @@ impl Core {
         let resolution = self.resolver.resolve(&t.text);
 
         // «Стоп» — в любом активном состоянии, даже во время вопроса и действия.
-        if matches!(&resolution, Resolution::Command { id, .. } if id == BUILTIN_STOP) {
-            self.emergency_stop("голос");
+        // По частичному тексту — только точное слово: «сто…» ещё может
+        // оказаться «столом», а не «стопом».
+        if matches!(&resolution, Resolution::Command { id, score, .. }
+            if id == BUILTIN_STOP && (t.is_final || *score >= EXACT_SCORE))
+        {
+            self.emergency_stop(Stop::Voice);
             return;
         }
 
@@ -509,6 +539,10 @@ impl Core {
                 tracing::info!(?best, "не понял");
                 self.apply(Event::NotUnderstood);
             }
+            Resolution::OutOfRange { id } => {
+                tracing::info!(%id, text = %t.text, "значение вне допустимого диапазона");
+                self.apply(Event::InvalidValue);
+            }
             Resolution::Empty => {}
         }
     }
@@ -525,7 +559,7 @@ impl Core {
         };
 
         if id == BUILTIN_STOP {
-            self.emergency_stop("голос");
+            self.emergency_stop(Stop::Voice);
             return;
         }
         if id == BUILTIN_RELOAD_COMMANDS {
@@ -854,8 +888,8 @@ impl Core {
 
     // ---------- аварийная остановка и прочее ----------
 
-    fn emergency_stop(&mut self, source: &str) {
-        tracing::warn!(source, "аварийная остановка");
+    fn emergency_stop(&mut self, stop: Stop) {
+        tracing::warn!(source = stop.source(), "аварийная остановка");
         if let Some(pending) = self.pending.take() {
             let approval = Approval {
                 heard: pending.heard,
@@ -877,7 +911,10 @@ impl Core {
                 Some("аварийная остановка".into()),
             );
         }
-        self.apply(Event::EmergencyStop);
+        self.apply(match stop {
+            Stop::Hotkey => Event::EmergencyStop,
+            Stop::Voice => Event::VoiceStop,
+        });
     }
 
     /// «Обнови команды»: перечитать пакеты без перезапуска. `false` — не
@@ -950,6 +987,11 @@ impl Core {
     }
 
     fn play(&mut self, reply: Reply) {
+        // Старый пакет может не знать нового ответа — сказать близкий по смыслу.
+        let reply = match reply.fallback() {
+            Some(fallback) if self.pack.variants(reply).is_empty() => fallback,
+            _ => reply,
+        };
         if self.pack.variants(reply).is_empty() {
             return;
         }

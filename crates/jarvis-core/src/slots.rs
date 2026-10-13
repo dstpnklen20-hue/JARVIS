@@ -10,6 +10,7 @@
 //! type = "number"
 //! min = 0
 //! max = 100
+//! clamp = true          # «громкость на 120» → 100; без clamp — отказ
 //!
 //! [command.slots.site]
 //! type = "choice"
@@ -26,8 +27,16 @@ pub type SlotValues = BTreeMap<String, String>;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SlotSpec {
-    Number { min: i64, max: i64 },
-    Choice { values: ChoiceValues },
+    Number {
+        min: i64,
+        max: i64,
+        /// Значение вне диапазона прижать к границе, а не отказать.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        clamp: bool,
+    },
+    Choice {
+        values: ChoiceValues,
+    },
 }
 
 /// Список («как сказано» = что подставить) или карта «как сказано → что подставить».
@@ -63,7 +72,7 @@ impl SlotSpec {
             ));
         }
         match self {
-            SlotSpec::Number { min, max } if min > max => {
+            SlotSpec::Number { min, max, .. } if min > max => {
                 Err(format!("слот `{name}`: min ({min}) больше max ({max})"))
             }
             SlotSpec::Number { .. } => Ok(()),
@@ -93,11 +102,29 @@ impl SlotSpec {
     /// Для числа `raw` — цифры; для выбора — произнесённое значение как в манифесте.
     pub fn accept(&self, raw: &str) -> Option<String> {
         match self {
-            SlotSpec::Number { min, max } => {
+            SlotSpec::Number { min, max, clamp } => {
                 let n: i64 = raw.trim().parse().ok()?;
+                if *clamp {
+                    return Some(n.clamp(*min, *max).to_string());
+                }
                 (*min..=*max).contains(&n).then(|| n.to_string())
             }
             SlotSpec::Choice { values } => values.value_for(raw),
+        }
+    }
+
+    /// Число распознано, но вне диапазона (и не прижимается) — повод
+    /// ответить «такое значение недопустимо», а не «не понял».
+    pub fn out_of_range(&self, raw: &str) -> bool {
+        match self {
+            SlotSpec::Number { min, max, clamp } => {
+                !clamp
+                    && raw
+                        .trim()
+                        .parse::<i64>()
+                        .is_ok_and(|n| !(*min..=*max).contains(&n))
+            }
+            SlotSpec::Choice { .. } => false,
         }
     }
 }
@@ -138,7 +165,11 @@ mod tests {
     use super::*;
 
     fn number(min: i64, max: i64) -> SlotSpec {
-        SlotSpec::Number { min, max }
+        SlotSpec::Number {
+            min,
+            max,
+            clamp: false,
+        }
     }
 
     #[test]
@@ -150,6 +181,56 @@ mod tests {
         assert_eq!(s.accept("-5"), None);
         assert_eq!(s.accept("сорок"), None);
         assert!(number(5, 1).validate("x").is_err());
+        assert!(s.out_of_range("101"));
+        assert!(s.out_of_range("-5"));
+        assert!(!s.out_of_range("40"));
+        assert!(!s.out_of_range("сорок"));
+    }
+
+    #[test]
+    fn clamped_number_slot_presses_to_bounds() {
+        let s = SlotSpec::Number {
+            min: 0,
+            max: 100,
+            clamp: true,
+        };
+        assert_eq!(s.accept("120"), Some("100".into()));
+        assert_eq!(s.accept("-3"), Some("0".into()));
+        assert_eq!(s.accept("55"), Some("55".into()));
+        assert_eq!(s.accept("громко"), None);
+        assert!(!s.out_of_range("120"));
+    }
+
+    #[test]
+    fn clamp_is_optional_and_does_not_change_old_fingerprints() {
+        #[derive(Deserialize)]
+        struct W {
+            s: SlotSpec,
+        }
+        let plain: W = toml::from_str(
+            "[s]
+type = \"number\"
+min = 0
+max = 100
+",
+        )
+        .unwrap();
+        assert_eq!(plain.s, number(0, 100));
+        // Без clamp сериализация прежняя — сохранённые разрешения не слетают.
+        assert_eq!(
+            serde_json::to_string(&plain.s).unwrap(),
+            r#"{"type":"number","min":0,"max":100}"#
+        );
+        let clamped: W = toml::from_str(
+            "[s]
+type = \"number\"
+min = 0
+max = 100
+clamp = true
+",
+        )
+        .unwrap();
+        assert!(matches!(clamped.s, SlotSpec::Number { clamp: true, .. }));
     }
 
     #[test]

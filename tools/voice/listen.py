@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import html
 import re
@@ -46,12 +47,21 @@ def auto_scores() -> dict[str, dict[str, str]]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Страница прослушивания")
+    parser.add_argument("--only", default="", help="начала id фраз через запятую (только новые фразы)")
+    parser.add_argument("--page", default="listen.html", help="имя файла страницы в out/")
+    args = parser.parse_args()
+    only = [p for p in args.only.split(",") if p]
+    # У каждой страницы свои сохранённые оценки.
+    storage_key = "jarvis-voice-ratings-" + ("r2" if args.page == "listen.html" else args.page.removesuffix(".html"))
     with open(OUT / "report.csv", encoding="utf-8-sig") as f:
         ref_name = next(r["name"] for r in csv.DictReader(f, delimiter=";") if r["file"] == REFERENCE)
     picks = auto_scores()
     phrases: dict[str, dict] = {}
     current = OUT / CURRENT
     for d in sorted(p for p in current.iterdir() if p.is_dir()):
+        if only and not any(d.name.startswith(prefix) for prefix in only):
+            continue
         entry = phrases.setdefault(d.name, {"text": (d / "text.txt").read_text(encoding="utf-8"), "takes": []})
         stressed = d / "stressed.txt"
         if stressed.exists():
@@ -64,7 +74,7 @@ def main() -> None:
                 {
                     "key": f"{d.name}:итог/{take}",
                     "src": f"{CURRENT}_best/{d.name}.wav",
-                    "label": f"Итог раунда 2 · {take} · обработан",
+                    "label": f"Итог · {take} · обработан",
                     "auto": True,
                 }
             )
@@ -106,7 +116,7 @@ def main() -> None:
         top = [t for t in e["takes"] if t["auto"]]
         rest = [t for t in e["takes"] if not t["auto"]]
         more = (
-            f'<details><summary>все дубли раунда 2, без обработки ({len(rest)})</summary>{"".join(map(take_html, rest))}</details>'
+            f'<details><summary>все дубли, без обработки ({len(rest)})</summary>{"".join(map(take_html, rest))}</details>'
             if rest
             else ""
         )
@@ -139,13 +149,13 @@ textarea {{ width:100%; min-height:160px; box-sizing:border-box; background:var(
 </style></head><body>
 <h1>Голос Джарвиса — прослушивание</h1>
 <p>Сначала послушайте эталон. У каждого дубля отметьте: как эталон / неплохо / плохо; «ударение» — если ударение не там.
-Раунд 2. Сверху у каждой фразы — итог (выбран и обработан: громкость, звонкость, запас в конце), под ним для сравнения раунд 1, сырые дубли — под катом. Оценки собираются в поле внизу — скопируйте его в чат.</p>
+Сверху у каждой фразы — итог (выбран и обработан: громкость, звонкость, запас в конце), под ним для сравнения раунд 1, сырые дубли — под катом. Оценки собираются в поле внизу — скопируйте его в чат.</p>
 <div class="ref"><b>Эталон — «Запрос выполнен, сэр»</b><br><audio controls src="clean/{html.escape(ref_name)}.wav"></audio></div>
 {''.join(rows)}
 <div class="bar"><b>Ваши оценки</b> <button id="copy">Скопировать</button><textarea id="out" readonly></textarea></div>
 <script>
 const state = {{}};
-try {{ Object.assign(state, JSON.parse(localStorage.getItem('jarvis-voice-ratings-r2') || '{{}}')); }} catch (e) {{}}
+try {{ Object.assign(state, JSON.parse(localStorage.getItem('{storage_key}') || '{{}}')); }} catch (e) {{}}
 function render() {{
   document.querySelectorAll('.take').forEach(t => {{
     const s = state[t.dataset.key] || {{}};
@@ -154,7 +164,7 @@ function render() {{
   const lines = Object.entries(state).filter(([, s]) => s.rate || s.stress)
     .map(([k, s]) => k + ' = ' + [s.rate, s.stress ? 'ударение' : ''].filter(Boolean).join(', '));
   document.getElementById('out').value = lines.join('\\n');
-  try {{ localStorage.setItem('jarvis-voice-ratings-r2', JSON.stringify(state)); }} catch (e) {{}}
+  try {{ localStorage.setItem('{storage_key}',JSON.stringify(state)); }} catch (e) {{}}
 }}
 document.querySelectorAll('.take button').forEach(b => b.addEventListener('click', () => {{
   const key = b.closest('.take').dataset.key; const s = state[key] = state[key] || {{}};
@@ -167,9 +177,9 @@ document.getElementById('copy').addEventListener('click', () => {{
 }});
 render();
 </script></body></html>"""
-    (OUT / "listen.html").write_text(page, encoding="utf-8")
+    (OUT / args.page).write_text(page, encoding="utf-8")
     total = sum(len(e["takes"]) for e in phrases.values())
-    print(f"Страница: {OUT / 'listen.html'} — {len(phrases)} фраз, {total} дублей")
+    print(f"Страница: {OUT / args.page} — {len(phrases)} фраз, {total} дублей")
 
 
 if __name__ == "__main__":

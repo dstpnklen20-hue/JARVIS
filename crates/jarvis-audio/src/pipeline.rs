@@ -5,6 +5,9 @@
 //!
 //! - На паузе микрофон закрывается (индикатор микрофона Windows гаснет).
 //! - Пока Джарвис говорит, вход заглушается ([`MuteGate`]) — он не слышит сам себя.
+//! - Пока ждём команду, детектор речи сообщает, что человек говорит
+//!   ([`PipelineEvent::Voice`]): короткое ожидание не обрывает начатую фразу,
+//!   даже если слова ещё не распознаны.
 //! - Пропал микрофон — конвейер сообщает об этом и пытается открыть его снова.
 //! - Паника внутри конвейера не роняет приложение: поток перезапускается.
 
@@ -23,6 +26,7 @@ use crate::models::SpeechModels;
 use crate::resample::{MODEL_RATE, StreamResampler};
 use crate::speaker::{SpeakerEncoder, Voiceprint};
 use crate::stt::{SherpaStt, SpeechToText, Transcript};
+use crate::vad::{Vad, VadSettings};
 use crate::wake::{SherpaWakeWord, WakeMatcher, WakeWordEngine};
 
 /// Сколько звука до начала слова активации отдать распознавателю команд.
@@ -36,6 +40,8 @@ const REOPEN_DELAY: Duration = Duration::from_secs(2);
 const MAX_RESTARTS: u32 = 5;
 /// Сколько ждать новых отсчётов, если буфер пуст.
 const IDLE_WAIT: Duration = Duration::from_millis(10);
+/// Как часто сообщать, что человек говорит (событий не больше).
+const VOICE_REPORT_EVERY: Duration = Duration::from_millis(200);
 
 pub struct PipelineSettings {
     /// `None` — системный микрофон.
@@ -73,6 +79,8 @@ pub enum PipelineEvent {
     Wake(WakeEvent),
     /// Текст команды (частичный или итоговый).
     Transcript(Transcript),
+    /// Пока ждём команду, детектор слышит речь (слов может ещё не быть).
+    Voice,
     /// Слово услышано, но голос не совпал с образцом.
     Rejected {
         heard: String,
@@ -226,6 +234,10 @@ struct Worker<'a> {
     /// Распознаются ли сейчас команды.
     transcribing: bool,
     speaker: Option<SpeakerEncoder>,
+    /// Детектор речи для ожидания команды; `None` — не загрузился (тогда
+    /// о речи судим только по распознанным словам).
+    vad: Option<Vad>,
+    last_voice: Option<Instant>,
     history: VecDeque<f32>,
     scratch: Vec<f32>,
     resampled: Vec<f32>,
@@ -265,6 +277,11 @@ fn worker(
             }
         },
     };
+    let vad = Vad::new(&settings.models.vad, VadSettings::default())
+        .inspect_err(|e| {
+            tracing::warn!(error = %jarvis_core::error_chain(e), "детектор речи не загрузился — паузу в речи определяю по словам")
+        })
+        .ok();
     events(PipelineEvent::Ready {
         load_time: started.elapsed(),
     });
@@ -277,6 +294,8 @@ fn worker(
         stt,
         transcribing: false,
         speaker,
+        vad,
+        last_voice: None,
         history: VecDeque::with_capacity(MODEL_RATE as usize * HISTORY_SECS),
         scratch: Vec::new(),
         resampled: Vec::new(),
@@ -322,7 +341,7 @@ impl Worker<'_> {
                 }
                 Some(Control::Transcribe(on)) => {
                     if on && !self.transcribing {
-                        self.stt.reset();
+                        self.start_transcribing();
                     }
                     self.transcribing = on;
                     continue;
@@ -425,10 +444,11 @@ impl Worker<'_> {
             self.history.drain(..excess);
         }
 
-        if self.transcribing
-            && let Some(transcript) = self.stt.accept(&self.resampled)
-        {
-            (self.events)(PipelineEvent::Transcript(transcript));
+        if self.transcribing {
+            if let Some(transcript) = self.stt.accept(&self.resampled) {
+                (self.events)(PipelineEvent::Transcript(transcript));
+            }
+            self.report_voice();
         }
 
         let Some(detection) = self.wake.accept(&self.resampled) else {
@@ -476,7 +496,7 @@ impl Worker<'_> {
         // слова активации: «Джарвис, открой ютуб» на одном дыхании.
         if !self.transcribing {
             self.transcribing = true;
-            self.stt.reset();
+            self.start_transcribing();
             let secs = detection.started_secs_ago.unwrap_or(1.0) + PREROLL_MARGIN_SECS;
             let len = ((secs * MODEL_RATE as f32) as usize).min(self.history.len());
             let preroll: Vec<f32> = self
@@ -488,6 +508,34 @@ impl Worker<'_> {
             if let Some(transcript) = self.stt.accept(&preroll) {
                 (self.events)(PipelineEvent::Transcript(transcript));
             }
+        }
+    }
+
+    fn start_transcribing(&mut self) {
+        self.stt.reset();
+        if let Some(vad) = &mut self.vad {
+            vad.reset();
+        }
+        self.last_voice = None;
+    }
+
+    /// Человек говорит — сообщить ядру (не чаще [`VOICE_REPORT_EVERY`]).
+    fn report_voice(&mut self) {
+        let Some(vad) = &mut self.vad else {
+            return;
+        };
+        // Готовые фразы детектора не нужны: текст даёт распознаватель.
+        let _ = vad.accept(&self.resampled);
+        if !vad.speaking() {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_voice
+            .is_none_or(|t| now.duration_since(t) >= VOICE_REPORT_EVERY)
+        {
+            self.last_voice = Some(now);
+            (self.events)(PipelineEvent::Voice);
         }
     }
 }
