@@ -1,7 +1,8 @@
 """Звуковой пакет sounds/jarvis/ по вашим оценкам на слух (data/оценки_раунд2.txt).
 
 Берутся все варианты с оценкой «эталон» — Джарвис чередует их. Строки вида
-`ok_1:итог/ref_dry_3 = эталон`: id фразы, откуда дубль, оценка.
+`ok_1:итог/ref_dry_3 = эталон`: id фразы, откуда дубль, оценка. «!» в конце
+(`= эталон !`) — паузу перед «сэр» сократить вдвое (tighten.py).
 - итог/<дубль>   — out/f5v2_best/<id>.wav (уже обработан);
 - f5v2/<дубль>   — сырой дубль раунда 2, обрабатывается здесь;
 - раунд1/<дубль> — сырой дубль раунда 1 (out/f5), обрабатывается здесь.
@@ -26,6 +27,7 @@ import soundfile as sf
 
 from clean import TARGET_RATE, finalize
 from polish import polish
+from tighten import tighten
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "tools" / "voice" / "out"
@@ -36,6 +38,8 @@ REPLIES = ("wake", "ok", "not_understood", "failed", "ask", "denied", "not_heard
 # Фраза, которая по смыслу относится к другому ответу, чем говорит её id:
 # «Простите, сэр, я не расслышал» — ответ на тишину после «Джарвис».
 GROUP_OF = {"not_understood_1": "not_heard"}
+# Дубли, где пауза перед «сэр» вдвое короче (отмечены «!»): (id, источник, дубль).
+TIGHTEN: set[tuple[str, str, str]] = set()
 SOURCES = {"итог": None, "f5v2": OUT / "f5v2", "раунд1": OUT / "f5"}
 # «Да, сэр»: лучший из дублей, где распознаются оба слова (out/f5_yes).
 YES_TAKE = OUT / "f5_yes" / "wake_1_0.6_1" / "ref_short_6.wav"
@@ -50,13 +54,16 @@ GREETINGS = {"greeting_1": "morning", "greeting_2": "day", "greeting_3": "evenin
 
 
 def rated() -> dict[str, list[tuple[str, str]]]:
-    """{id: [(источник, дубль)]} с оценкой «эталон», без повторов."""
+    """{id: [(источник, дубль)]} с оценкой «эталон», без повторов. Отмеченные «!»
+    попадают в TIGHTEN."""
     out: dict[str, list[tuple[str, str]]] = defaultdict(list)
     lines = [line for path in RATINGS if path.exists() for line in path.read_text(encoding="utf-8").splitlines()]
     for line in lines:
-        m = re.match(r"(\w+):(итог|f5v2|раунд1)/(\S+)\s*=\s*эталон", line.strip())
+        m = re.match(r"(\w+):(итог|f5v2|раунд1)/(\S+)\s*=\s*эталон\s*(!)?", line.strip())
         if m and (m.group(2), m.group(3)) not in out[m.group(1)]:
             out[m.group(1)].append((m.group(2), m.group(3)))
+        if m and m.group(4):
+            TIGHTEN.add((m.group(1), m.group(2), m.group(3)))
     return out
 
 
@@ -101,6 +108,9 @@ def main() -> None:
             else:
                 finalize(src, dst)
                 polish(dst, target)
+            if (pid, source, take) in TIGHTEN:
+                before, after = tighten(dst, 0.5)
+                print(f"{dst.name}: пауза перед «сэр» {before:.2f} с → {after:.2f} с")
             if in_pack:
                 groups[group].append(dst)
             elif pid in GREETINGS:
