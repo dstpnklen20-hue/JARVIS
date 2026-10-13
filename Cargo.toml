@@ -6,6 +6,7 @@ members = [
     "crates/jarvis-audio",
     "crates/jarvis-nlu",
     "crates/jarvis-actions",
+    "crates/jarvis-llm",
     "crates/jarvis-app",
 ]
 
@@ -22,8 +23,14 @@ jarvis-platform = { path = "crates/jarvis-platform" }
 jarvis-audio = { path = "crates/jarvis-audio" }
 jarvis-nlu = { path = "crates/jarvis-nlu" }
 jarvis-actions = { path = "crates/jarvis-actions" }
+jarvis-llm = { path = "crates/jarvis-llm" }
 
 anyhow = "1.0.104"
+# Хранилище секретов ОС (Windows: Диспетчер учётных данных); по умолчанию — API v1.
+keyring = "4.2.0"
+# HTTP для Claude API. TLS — системный (Windows SChannel): rustls по умолчанию
+# тянет aws-lc-rs, которому для сборки нужны CMake и NASM.
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "native-tls", "http2"] }
 clap = { version = "4.6.7", features = ["derive"] }
 cpal = "0.18.2"
 ringbuf = "0.5.2"
