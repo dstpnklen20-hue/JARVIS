@@ -21,10 +21,19 @@ type = "open_url"
 url = "https://www.google.com"
 
 [[command]]
-id = "open_yandex"
-phrases = ["открой яндекс"]
-description = "откроет Яндекс в браузере"
+id = "open_browser"
+phrases = ["открой браузер", "запусти браузер", "открой файрфокс", "запусти файрфокс"]
+description = "запустит браузер Firefox"
+reply = "ok"
+[command.action]
+type = "launch_app"
+path = 'C:\Program Files\Mozilla Firefox\firefox.exe'
+
+[[command]]
+id = "open_calendar"
+phrases = ["открой календарь", "покажи календарь", "открой гугл календарь"]
+description = "откроет Google Календарь в браузере"
 reply = "ok"
 [command.action]
 type = "open_url"
-url = "https://ya.ru"
+url = "https://calendar.google.com"

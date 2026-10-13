@@ -482,6 +482,12 @@ mod tests {
         assert_eq!(id("сделай громче"), "media_volume_up");
         assert_eq!(id("тише"), "media_volume_down");
         assert_eq!(id("выключи звук"), "media_mute");
+        assert_eq!(id("открой браузер"), "open_browser");
+        assert_eq!(id("открой календарь"), "open_calendar");
+        assert_eq!(id("открой диспетчер задач"), "app_task_manager");
+        assert_eq!(id("запусти клод"), "app_claude");
+        assert_eq!(id("запусти хап"), "app_happ");
+        assert_eq!(id("открой проводник"), "app_explorer");
     }
 
     #[test]

@@ -30,3 +30,32 @@ reply = "ok"
 [command.action]
 type = "launch_app"
 path = "explorer.exe"
+
+[[command]]
+id = "app_task_manager"
+phrases = ["открой диспетчер задач", "запусти диспетчер задач", "диспетчер задач"]
+description = "откроет Диспетчер задач (Ctrl+Shift+Esc)"
+reply = "ok"
+[command.action]
+type = "hotkey"
+keys = ["ctrl", "shift", "esc"]
+
+# Приложение из Microsoft Store запускается через оболочку: shell:AppsFolder\<семейство>!<приложение>.
+[[command]]
+id = "app_claude"
+phrases = ["запусти клод", "открой клод", "запусти клоуд", "открой клоуд"]
+description = "запустит приложение Claude"
+reply = "ok"
+[command.action]
+type = "launch_app"
+path = "explorer.exe"
+args = ['shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude']
+
+[[command]]
+id = "app_happ"
+phrases = ["запусти хап", "открой хап", "запусти хапп", "включи хап"]
+description = "запустит Happ (прокси)"
+reply = "ok"
+[command.action]
+type = "launch_app"
+path = 'E:\SCS\Happ\Happ.exe'
