@@ -69,6 +69,10 @@ cargo build --release
 
 ## Запуск
 
+**Проще всего — `jarvis-start.cmd`** в корне проекта (двойной щелчок): запускает Джарвиса, а если
+он уже работает — перезапускает (останавливает, ждёт, запускает заново). Нужна собранная
+release-версия (`cargo build --release`).
+
 ```powershell
 .\target\release\jarvis.exe            # значок появится в трее
 .\target\release\jarvis.exe --stop     # мягко остановить работающего Джарвиса
