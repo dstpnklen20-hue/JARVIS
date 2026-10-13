@@ -146,6 +146,7 @@ pub fn run(root: &Path, config: Config, restart: bool) -> anyhow::Result<()> {
     let (core_tx, core_rx) = mpsc::channel::<CoreMsg>();
     let window_config = config.clone();
     let editor_dir = resolve(root, &config.paths.commands);
+    let journal_dir = resolve(root, &config.logging.dir);
     let webview_dir = resolve(root, &config.paths.data).join("webview");
     let commands_dir = resolve(root, &config.paths.commands);
     let wake_matcher = hearing.matcher.clone();
@@ -275,6 +276,7 @@ pub fn run(root: &Path, config: Config, restart: bool) -> anyhow::Result<()> {
                         };
                         w.update(&reply);
                     }
+                    PageMsg::Journal => w.update(&crate::main_window::journal_json(&journal_dir)),
                     PageMsg::PickProgram => {
                         if let Some(path) = w.pick_program() {
                             w.update(&json!({ "picked": path.display().to_string() }));

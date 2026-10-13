@@ -266,6 +266,19 @@
   .cmd .side { display: flex; gap: 6px; align-items: start; }
   .toolnote { color: var(--muted); font-size: 12px; margin: -6px 0 10px; min-height: 16px; }
 
+  /* журнал действий */
+  .journal { display: none; }
+  #commands.journaling .journal { display: block; }
+  #commands.journaling .listing { display: none; }
+  .j-title { flex: 1; margin: 0; font-size: 18px; font-weight: 600; align-self: center; }
+  .j-item { padding: 9px 12px; margin-bottom: 6px; background: var(--panel); border: 1px solid var(--line);
+            border-radius: 8px; border-left: 3px solid #3ccf6e; }
+  .j-item.bad { border-left-color: #ef5350; }
+  .j-head { display: flex; gap: 10px; align-items: baseline; }
+  .j-head b { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .j-head span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .j-meta { color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+
   /* редактор команды */
   .editor { display: none; }
   #commands.editing .editor { display: block; }
@@ -384,10 +397,19 @@
       <div class="listing">
         <div class="toolbar">
           <input class="search" id="search" placeholder="Поиск: фраза или действие" autocomplete="off">
+          <button class="btn ghost" id="cmd-journal" title="Что Джарвис выполнял">Журнал</button>
           <button class="btn" id="cmd-new" title="Новая команда в личном пакете">+ Новая</button>
         </div>
         <div class="toolnote" id="cmd-note"></div>
         <div id="cmd-list"></div>
+      </div>
+
+      <div class="journal" id="journal">
+        <div class="toolbar">
+          <h2 class="j-title">Журнал действий</h2>
+          <button class="btn ghost" id="journal-back">Назад</button>
+        </div>
+        <div id="journal-list"></div>
       </div>
 
       <div class="editor" id="editor">
@@ -493,12 +515,9 @@
       <div class="group">
         <h3>Слух</h3>
         <div class="row">
-          <label>Микрофон <span class="tag">перезапуск</span></label>
+          <label>Микрофон</label>
           <select id="set-mic"></select>
         </div>
-      </div>
-      <div class="group">
-        <h3>Слушать</h3>
         <div class="row">
           <label>Ждать следующую команду<small>после ответа — без «Джарвис», секунд</small></label>
           <input type="range" id="set-follow" min="3" max="60" step="1">
@@ -509,7 +528,7 @@
           <span class="switch"><input type="checkbox" id="set-voice-check"><i></i></span>
         </div>
         <div class="row">
-          <label>Строгость проверки голоса <span class="tag">перезапуск</span></label>
+          <label>Строгость проверки голоса</label>
           <select id="set-threshold"></select>
         </div>
       </div>
@@ -660,6 +679,7 @@ const jarvis = {
     if ("restart" in data) $("restart").hidden = !data.restart;
     if (data.tab) showTab(data.tab);
     if (data.editor) editorReply(data.editor);
+    if (data.journal) renderJournal(data.journal);
     if (data.picked) $("ed-path").value = data.picked;
   },
 };
@@ -846,6 +866,28 @@ function editorReply(reply) {
   }
 }
 
+// ---------- журнал ----------
+function renderJournal(items) {
+  const list = $("journal-list");
+  list.replaceChildren();
+  for (const it of items) {
+    const box = el("div", "j-item" + (it.ok ? "" : " bad"));
+    const head = el("div", "j-head");
+    head.appendChild(el("b", null, `«${it.heard}»`));
+    head.appendChild(el("span", null, it.when));
+    box.appendChild(head);
+    const meta = [it.command, it.permission, it.result].filter(Boolean).join(" · ");
+    box.appendChild(el("div", "j-meta", it.error ? `${meta} — ${it.error}` : meta));
+    list.appendChild(box);
+  }
+  if (!items.length) list.appendChild(el("div", "empty", "Пока пусто"));
+}
+$("cmd-journal").addEventListener("click", () => {
+  $("commands").classList.add("journaling");
+  send({ type: "journal" });
+});
+$("journal-back").addEventListener("click", () => $("commands").classList.remove("journaling"));
+
 // ---------- настройки ----------
 function options(select, items, value) {
   select.replaceChildren(...items.map((it) => {
@@ -946,7 +988,7 @@ if (native) {
       dry_run: false,
       greet: true,
       voice_check: true,
-      thresholds: [{ value: "auto", label: "Как подобрано при записи образца" }, { value: "0.25", label: "Мягко — 0.25" }, { value: "0.50", label: "Строго — 0.50" }],
+      thresholds: [{ value: "auto", label: "Авто (по образцу)" }, { value: "0.25", label: "Мягко — 0.25" }, { value: "0.50", label: "Строго — 0.50" }],
       threshold: "auto",
     },
   });
@@ -954,6 +996,14 @@ if (native) {
   const query = new URLSearchParams(location.search);
   if (query.get("tab")) showTab(query.get("tab"));
   if (query.get("edit")) openEditor(commands.find((c) => c.editable)?.form);
+  if (query.get("journal")) {
+    $("commands").classList.add("journaling");
+    renderJournal([
+      { when: "13.10 23:12", heard: "запусти кс", command: "game_cs2", permission: "не ответили", result: "не выполнено", ok: false },
+      { when: "13.10 23:11", heard: "нейросеть: открой ютуб", command: "open_youtube", permission: "разрешено раньше", result: "выполнено", ok: true },
+      { when: "13.10 23:11", heard: "нейросеть: тише", command: "media_volume_down", permission: "разрешили всегда (голосом)", result: "выполнено", ok: true },
+    ]);
+  }
   if (query.get("state")) {
     document.documentElement.style.setProperty("--level", "0");
     document.body.classList.add("no-anim");

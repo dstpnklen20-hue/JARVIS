@@ -62,6 +62,8 @@ pub enum PageMsg {
     },
     /// «Выбрать…» у пути программы.
     PickProgram,
+    /// Открыт журнал действий.
+    Journal,
 }
 
 impl PageMsg {
@@ -78,6 +80,7 @@ impl PageMsg {
             PageMsg::SaveCommand(_) => "save_command",
             PageMsg::DeleteCommand { .. } => "delete_command",
             PageMsg::PickProgram => "pick_program",
+            PageMsg::Journal => "journal",
         }
     }
 }
@@ -324,6 +327,86 @@ pub fn commands_json(registry: &Registry, permissions: &PermissionStore) -> Valu
     json!({ "commands": list })
 }
 
+/// Сколько последних записей журнала показывать.
+const JOURNAL_LIMIT: usize = 100;
+
+/// Последние записи журнала действий (`logs/actions.*.jsonl`), новые сверху.
+pub fn journal_json(log_dir: &Path) -> Value {
+    let mut files: Vec<_> = std::fs::read_dir(log_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("actions.") && n.ends_with(".jsonl"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Имена с датой: по убыванию — сначала свежие.
+    files.sort_by(|a, b| b.cmp(a));
+    let mut items = Vec::new();
+    'files: for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in text.lines().rev() {
+            if items.len() >= JOURNAL_LIMIT {
+                break 'files;
+            }
+            if let Ok(entry) = serde_json::from_str::<Value>(line) {
+                items.push(journal_item(&entry));
+            }
+        }
+    }
+    json!({ "journal": items })
+}
+
+fn journal_item(entry: &Value) -> Value {
+    let text = |key: &str| entry[key].as_str().unwrap_or_default();
+    // «2026-10-13T23:11:26+04:00» → «13.10 23:11».
+    let time = text("time");
+    let when = match (time.get(5..7), time.get(8..10), time.get(11..16)) {
+        (Some(month), Some(day), Some(clock)) => format!("{day}.{month} {clock}"),
+        _ => time.to_owned(),
+    };
+    let mut permission = match text("permission") {
+        "saved" => "разрешено раньше",
+        "once" => "разрешили один раз",
+        "always" => "разрешили всегда",
+        "no" => "отказали",
+        "never" => "запретили навсегда",
+        "saved_never" => "запрещено раньше",
+        "timeout" => "не ответили",
+        "builtin" => "встроенная",
+        "dry_run" => "режим отладки",
+        other => other,
+    }
+    .to_owned();
+    match text("answered_by") {
+        "voice" => permission.push_str(" (голосом)"),
+        "button" => permission.push_str(" (кнопкой)"),
+        _ => {}
+    }
+    let result = match text("result") {
+        "ok" => "выполнено",
+        "failed" => "не удалось",
+        "not_executed" => "не выполнено",
+        other => other,
+    };
+    json!({
+        "when": when,
+        "heard": text("heard"),
+        "command": text("command"),
+        "permission": permission,
+        "result": result,
+        "ok": text("result") == "ok",
+        "error": entry["error"].as_str(),
+    })
+}
+
 fn problem_text(indicator: &Indicator) -> Value {
     match indicator {
         Indicator::Problem(why) => json!(why),
@@ -502,6 +585,37 @@ mod tests {
         assert_eq!(list[2]["always_ask"], false);
         assert_eq!(list[3]["always_ask"], true);
         assert_eq!(list[1]["action"], "Открыть youtube");
+    }
+
+    #[test]
+    fn journal_reads_newest_first_with_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("actions.2026-10-12.jsonl"),
+            r#"{"time":"2026-10-12T22:00:00+04:00","heard":"открой ютуб","command":"open_youtube","score":1.0,"permission":"once","answered_by":"button","result":"ok"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("actions.2026-10-13.jsonl"),
+            r#"{"time":"2026-10-13T23:11:26+04:00","heard":"тише","command":"media_volume_down","score":1.0,"permission":"saved","result":"ok"}
+не json
+{"time":"2026-10-13T23:12:00+04:00","heard":"запусти кс","command":"game_cs2","score":0.9,"permission":"timeout","result":"not_executed"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("jarvis.2026-10-13.log"), "лог").unwrap();
+        let journal = journal_json(dir.path());
+        let items = journal["journal"].as_array().unwrap();
+        let heard: Vec<_> = items.iter().map(|i| i["heard"].as_str().unwrap()).collect();
+        assert_eq!(heard, ["запусти кс", "тише", "открой ютуб"]);
+        assert_eq!(items[0]["when"], "13.10 23:12");
+        assert_eq!(items[0]["permission"], "не ответили");
+        assert_eq!(items[0]["result"], "не выполнено");
+        assert_eq!(items[2]["permission"], "разрешили один раз (кнопкой)");
+        assert_eq!(items[2]["ok"], true);
+        // Нет папки — пустой журнал, без ошибки.
+        assert_eq!(journal_json(&dir.path().join("нет"))["journal"], json!([]));
     }
 
     #[test]
