@@ -7,6 +7,7 @@
 //! память — закрытое окно её не занимает).
 
 use std::num::NonZeroIsize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -173,6 +174,47 @@ impl AppWindow {
         unsafe {
             SetTimer(self.hwnd, 1, ms.max(10), None);
         }
+    }
+
+    /// Окно «Открыть» для выбора программы (.exe; выбранный ярлык Windows
+    /// сама заменяет путём к программе). `None` — отменили. Модальное: пока
+    /// оно открыто, цикл сообщений крутит сам диалог.
+    pub fn pick_program(&self) -> Option<PathBuf> {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+        use windows_sys::Win32::UI::Controls::Dialogs::{
+            GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR,
+            OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        };
+
+        // Фильтр: пары «название\0маска\0», в конце ещё \0.
+        let filter: Vec<u16> = "Программы и ярлыки\0*.exe;*.lnk\0Все файлы\0*.*\0\0"
+            .encode_utf16()
+            .collect();
+        let title = wide("Выберите программу");
+        let mut file = vec![0u16; 4096];
+        // SAFETY: структура обнулена и заполнена; буферы и строки живут до
+        // конца вызова; окно-владелец — наше окно этого потока.
+        let chosen = unsafe {
+            let mut ofn: OPENFILENAMEW = std::mem::zeroed();
+            ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+            ofn.hwndOwner = self.hwnd;
+            ofn.lpstrFilter = filter.as_ptr();
+            ofn.lpstrFile = file.as_mut_ptr();
+            ofn.nMaxFile = file.len() as u32;
+            ofn.lpstrTitle = title.as_ptr();
+            ofn.Flags = OFN_EXPLORER
+                | OFN_FILEMUSTEXIST
+                | OFN_PATHMUSTEXIST
+                | OFN_HIDEREADONLY
+                | OFN_NOCHANGEDIR;
+            GetOpenFileNameW(&mut ofn) != 0
+        };
+        if !chosen {
+            return None;
+        }
+        let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+        Some(PathBuf::from(OsString::from_wide(&file[..len])))
     }
 
     /// Развернуть, если свёрнуто, и вывести вперёд.

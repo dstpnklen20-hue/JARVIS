@@ -34,7 +34,7 @@
     user-select: none;
     overflow: hidden;
   }
-  button, input, select { font: inherit; color: inherit; }
+  button, input, select, textarea { font: inherit; color: inherit; }
 
   /* ---------- окно ---------- */
   .app {
@@ -260,6 +260,38 @@
   .savebar { display: flex; align-items: center; gap: 12px; justify-content: flex-end; margin: 6px 0 4px; }
   .savebar span { color: var(--muted); font-size: 12px; margin-right: auto; }
 
+  .btn.small { padding: 4px 9px; font-size: 12px; }
+  .btn.danger { border-color: #5a2424; background: #2a1414; color: #ef8a8a; }
+  .btn.ghost { border-color: var(--line); background: var(--panel-2); }
+  .cmd .side { display: flex; gap: 6px; align-items: start; }
+  .toolnote { color: var(--muted); font-size: 12px; margin: -6px 0 10px; min-height: 16px; }
+
+  /* редактор команды */
+  .editor { display: none; }
+  #commands.editing .editor { display: block; }
+  #commands.editing .listing { display: none; }
+  .editor h2 { margin: 0 0 12px; font-size: 18px; font-weight: 600; letter-spacing: .03em; }
+  .fld { display: block; margin-bottom: 14px; }
+  .fld > span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px;
+                letter-spacing: .06em; text-transform: uppercase; }
+  .fld small { display: block; margin-top: 4px; color: var(--dim); font-size: 12px; }
+  .fld input[type=text], .fld input[type=number], .fld textarea, .fld select {
+    width: 100%; max-width: none; padding: 8px 10px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; outline: none; resize: vertical;
+  }
+  .fld input:focus, .fld textarea:focus, .fld select:focus {
+    border-color: color-mix(in srgb, var(--c) 60%, var(--line));
+  }
+  .inline { display: flex; gap: 8px; }
+  .inline input { flex: 1; }
+  .check { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; cursor: pointer; }
+  .check input { accent-color: var(--c); width: 16px; height: 16px; }
+  .act { display: none; }
+  .act.on { display: block; }
+  .ed-error { color: #ef8a8a; font-size: 13px; min-height: 18px; margin-bottom: 8px; }
+  .ed-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+  .ed-buttons .btn.danger { margin-right: auto; }
+
   body.no-anim * { transition: none !important; }
 
   /* ---------- макет в браузере ---------- */
@@ -349,10 +381,111 @@
 
     <!-- Команды -->
     <section class="page" id="commands">
-      <div class="toolbar">
-        <input class="search" id="search" placeholder="Поиск: фраза или действие" autocomplete="off">
+      <div class="listing">
+        <div class="toolbar">
+          <input class="search" id="search" placeholder="Поиск: фраза или действие" autocomplete="off">
+          <button class="btn" id="cmd-new" title="Новая команда в личном пакете">+ Новая</button>
+        </div>
+        <div class="toolnote" id="cmd-note"></div>
+        <div id="cmd-list"></div>
       </div>
-      <div id="cmd-list"></div>
+
+      <div class="editor" id="editor">
+        <h2 id="ed-title">Новая команда</h2>
+        <label class="fld"><span>Фразы</span>
+          <textarea id="ed-phrases" rows="3" placeholder="открой почту&#10;запусти почту"></textarea>
+          <small>По одной в строке — так вы будете говорить после «Джарвис»</small>
+        </label>
+        <label class="fld"><span>Что сделает</span>
+          <input type="text" id="ed-desc" placeholder="откроет почту в браузере" autocomplete="off">
+          <small>Звучит в вопросе-разрешении: «команда „…“ откроет почту в браузере»</small>
+        </label>
+        <label class="fld"><span>Действие</span>
+          <select id="ed-type">
+            <option value="open_url">Открыть сайт</option>
+            <option value="launch_app">Запустить программу</option>
+            <option value="hotkey">Нажать сочетание клавиш</option>
+            <option value="key_press">Нажать клавишу</option>
+            <option value="media">Музыка и громкость</option>
+            <option value="say">Сказать фразу</option>
+          </select>
+        </label>
+
+        <div class="act" data-act="open_url">
+          <label class="fld"><span>Адрес</span>
+            <input type="text" id="ed-url" placeholder="https://mail.google.com" autocomplete="off">
+          </label>
+          <label class="fld"><span>Искать открытую вкладку</span>
+            <input type="text" id="ed-tabs" placeholder="Почта*; Gmail*" autocomplete="off">
+            <small>Необязательно. Заголовки вкладок через «;», «*» — любые символы. Нашлась — переключится на неё (Firefox)</small>
+          </label>
+        </div>
+        <div class="act" data-act="launch_app">
+          <label class="fld"><span>Программа</span>
+            <span class="inline">
+              <input type="text" id="ed-path" placeholder="C:\Program Files\…\program.exe" autocomplete="off">
+              <button class="btn ghost" id="ed-pick" type="button">Выбрать…</button>
+            </span>
+          </label>
+          <label class="fld"><span>Аргументы</span>
+            <textarea id="ed-args" rows="2" placeholder="необязательно, по одному в строке"></textarea>
+          </label>
+          <label class="check"><input type="checkbox" id="ed-focus" checked> Уже открыта — вывести её окно вперёд</label>
+        </div>
+        <div class="act" data-act="hotkey">
+          <label class="fld"><span>Сочетание</span>
+            <input type="text" id="ed-keys" placeholder="Ctrl+Shift+Esc" autocomplete="off">
+            <small>Клавиши через «+»: Ctrl, Shift, Alt, Win, буквы, F1–F12, Esc, Tab, Enter…</small>
+          </label>
+        </div>
+        <div class="act" data-act="key_press">
+          <label class="fld"><span>Клавиша</span>
+            <input type="text" id="ed-key" placeholder="F5" autocomplete="off">
+          </label>
+        </div>
+        <div class="act" data-act="media">
+          <label class="fld"><span>Что сделать</span>
+            <select id="ed-media">
+              <option value="play_pause">Пауза / продолжить</option>
+              <option value="next">Следующий трек</option>
+              <option value="previous">Предыдущий трек</option>
+              <option value="stop">Остановить</option>
+              <option value="volume_up">Громче</option>
+              <option value="volume_down">Тише</option>
+              <option value="volume_set">Поставить громкость</option>
+              <option value="mute">Выключить звук</option>
+            </select>
+          </label>
+          <label class="fld" id="ed-level-box"><span>Громкость, %</span>
+            <input type="number" id="ed-level" min="0" max="100" value="40">
+          </label>
+        </div>
+        <div class="act" data-act="say">
+          <label class="fld"><span>Фраза</span>
+            <select id="ed-say">
+              <option value="ok">«Запрос выполнен, сэр»</option>
+              <option value="wake">«Да, сэр»</option>
+              <option value="thinking">«Секунду, сэр»</option>
+              <option value="not_understood">«Не понял, сэр»</option>
+              <option value="failed">«Не удалось, сэр»</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="fld"><span>Ответ после выполнения</span>
+          <select id="ed-reply">
+            <option value="ok">«Запрос выполнен, сэр»</option>
+            <option value="none">Молча</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="ed-always-ask"> Спрашивать разрешение каждый раз</label>
+        <div class="ed-error" id="ed-error"></div>
+        <div class="ed-buttons">
+          <button class="btn danger" id="ed-delete" type="button">Удалить</button>
+          <button class="btn ghost" id="ed-cancel" type="button">Отмена</button>
+          <button class="btn" id="ed-save" type="button">Сохранить</button>
+        </div>
+      </div>
     </section>
 
     <!-- Настройки -->
@@ -362,6 +495,22 @@
         <div class="row">
           <label>Микрофон <span class="tag">перезапуск</span></label>
           <select id="set-mic"></select>
+        </div>
+      </div>
+      <div class="group">
+        <h3>Слушать</h3>
+        <div class="row">
+          <label>Ждать следующую команду<small>после ответа — без «Джарвис», секунд</small></label>
+          <input type="range" id="set-follow" min="3" max="60" step="1">
+          <span class="val" id="set-follow-val"></span>
+        </div>
+        <div class="row">
+          <label>Только мой голос<small>не откликаться на телевизор и гостей</small></label>
+          <span class="switch"><input type="checkbox" id="set-voice-check"><i></i></span>
+        </div>
+        <div class="row">
+          <label>Строгость проверки голоса <span class="tag">перезапуск</span></label>
+          <select id="set-threshold"></select>
         </div>
       </div>
       <div class="group">
@@ -401,6 +550,18 @@
         <div class="row">
           <label>Запускать при входе в Windows</label>
           <span class="switch"><input type="checkbox" id="set-autostart"><i></i></span>
+        </div>
+        <div class="row">
+          <label>Приветствие при запуске</label>
+          <span class="switch"><input type="checkbox" id="set-greet"><i></i></span>
+        </div>
+        <div class="row">
+          <label>Аварийная остановка<small>горячая клавиша; пусто — без неё</small></label>
+          <input class="field" type="text" id="set-hotkey" placeholder="Ctrl+Alt+F12" autocomplete="off">
+        </div>
+        <div class="row">
+          <label>Режим отладки<small>команды распознаются и пишутся в журнал, но не выполняются</small></label>
+          <span class="switch"><input type="checkbox" id="set-dry-run"><i></i></span>
         </div>
       </div>
       <div class="savebar">
@@ -498,6 +659,8 @@ const jarvis = {
     if (data.note) $("save-note").textContent = data.note;
     if ("restart" in data) $("restart").hidden = !data.restart;
     if (data.tab) showTab(data.tab);
+    if (data.editor) editorReply(data.editor);
+    if (data.picked) $("ed-path").value = data.picked;
   },
 };
 window.jarvis = jarvis;
@@ -564,7 +727,14 @@ function renderCommands() {
         renderCommands();
       });
     }
-    card.appendChild(perm);
+    const side = el("div", "side");
+    if (c.editable) {
+      const editBtn = el("button", "btn small ghost", "Изменить");
+      editBtn.addEventListener("click", () => openEditor(c.form));
+      side.appendChild(editBtn);
+    }
+    side.appendChild(perm);
+    card.appendChild(side);
     card.appendChild(el("div", "action", c.action));
     list.appendChild(card);
     shown++;
@@ -572,6 +742,109 @@ function renderCommands() {
   if (!shown) list.appendChild(el("div", "empty", q ? "Ничего не нашлось" : "Команд нет"));
 }
 $("search").addEventListener("input", renderCommands);
+
+// ---------- редактор команды ----------
+let editing = null; // id изменяемой команды или null для новой
+let confirmDelete = false;
+const lines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
+
+function showAct() {
+  const type = $("ed-type").value;
+  document.querySelectorAll(".act").forEach((a) => a.classList.toggle("on", a.dataset.act === type));
+  $("ed-level-box").hidden = $("ed-media").value !== "volume_set";
+}
+$("ed-type").addEventListener("change", showAct);
+$("ed-media").addEventListener("change", showAct);
+
+function openEditor(form) {
+  const f = form || { phrases: [], description: "", reply: "ok", always_ask: false,
+                      action: { type: "open_url", url: "", find_tab: [] } };
+  editing = f.id || null;
+  confirmDelete = false;
+  $("ed-title").textContent = editing ? "Изменить команду" : "Новая команда";
+  $("ed-delete").hidden = !editing;
+  $("ed-delete").textContent = "Удалить";
+  $("ed-phrases").value = f.phrases.join("\n");
+  $("ed-desc").value = f.description;
+  $("ed-reply").value = f.reply;
+  $("ed-always-ask").checked = f.always_ask;
+  const a = f.action;
+  $("ed-type").value = a.type;
+  $("ed-url").value = a.url || "";
+  $("ed-tabs").value = (a.find_tab || []).join("; ");
+  $("ed-path").value = a.path || "";
+  $("ed-args").value = (a.args || []).join("\n");
+  $("ed-focus").checked = a.type === "launch_app" ? !!a.focus : true;
+  $("ed-keys").value = (a.keys || []).join("+");
+  $("ed-key").value = a.key || "";
+  $("ed-media").value = a.operation || "play_pause";
+  $("ed-level").value = a.level ?? 40;
+  $("ed-say").value = a.reply || "ok";
+  $("ed-error").textContent = "";
+  showAct();
+  $("commands").classList.add("editing");
+  $("ed-phrases").focus();
+}
+function closeEditor() {
+  $("commands").classList.remove("editing");
+}
+
+function readAction() {
+  switch ($("ed-type").value) {
+    case "open_url":
+      return { type: "open_url", url: $("ed-url").value,
+               find_tab: $("ed-tabs").value.split(";").map((s) => s.trim()).filter(Boolean) };
+    case "launch_app":
+      return { type: "launch_app", path: $("ed-path").value, args: lines($("ed-args").value),
+               focus: $("ed-focus").checked };
+    case "hotkey":
+      return { type: "hotkey", keys: $("ed-keys").value.split("+").map((s) => s.trim()).filter(Boolean) };
+    case "key_press":
+      return { type: "key_press", key: $("ed-key").value };
+    case "media": {
+      const operation = $("ed-media").value;
+      const action = { type: "media", operation };
+      if (operation === "volume_set") action.level = Number($("ed-level").value);
+      return action;
+    }
+    default:
+      return { type: "say", reply: $("ed-say").value };
+  }
+}
+
+$("ed-save").addEventListener("click", () => {
+  $("ed-error").textContent = "Проверяю…";
+  const form = {
+    phrases: lines($("ed-phrases").value),
+    description: $("ed-desc").value,
+    always_ask: $("ed-always-ask").checked,
+    reply: $("ed-reply").value,
+    action: readAction(),
+  };
+  if (editing) form.id = editing;
+  send({ type: "save_command", ...form });
+});
+$("ed-delete").addEventListener("click", () => {
+  if (!confirmDelete) {
+    confirmDelete = true;
+    $("ed-delete").textContent = "Точно удалить?";
+    return;
+  }
+  send({ type: "delete_command", id: editing });
+});
+$("ed-cancel").addEventListener("click", closeEditor);
+$("ed-pick").addEventListener("click", () => send({ type: "pick_program" }));
+$("cmd-new").addEventListener("click", () => openEditor(null));
+
+function editorReply(reply) {
+  if (reply.ok) {
+    closeEditor();
+    $("cmd-note").textContent = reply.note || "";
+    send({ type: "commands" });
+  } else {
+    $("ed-error").textContent = reply.error || "Не сохранено";
+  }
+}
 
 // ---------- настройки ----------
 function options(select, items, value) {
@@ -592,7 +865,15 @@ function fillSettings(s) {
   $("set-window").checked = s.show_window;
   $("set-autostart").checked = s.autostart;
   $("key-status").textContent = s.has_key ? "задан — хранится в Windows" : "не задан";
+  $("set-follow").value = s.follow_up_secs;
+  $("set-follow-val").textContent = s.follow_up_secs + " с";
+  $("set-voice-check").checked = s.voice_check;
+  options($("set-threshold"), s.thresholds, s.threshold);
+  $("set-greet").checked = s.greet;
+  $("set-hotkey").value = s.emergency_stop;
+  $("set-dry-run").checked = s.dry_run;
 }
+$("set-follow").addEventListener("input", (e) => { $("set-follow-val").textContent = e.target.value + " с"; });
 $("set-volume").addEventListener("input", (e) => { $("set-volume-val").textContent = e.target.value + "%"; });
 $("set-autostart").addEventListener("change", (e) => send({ type: "autostart", on: e.target.checked }));
 $("save").addEventListener("click", () => send({
@@ -603,6 +884,12 @@ $("save").addEventListener("click", () => send({
   volume: Number($("set-volume").value),
   llm: $("set-llm").checked,
   show_window: $("set-window").checked,
+  follow_up_secs: Number($("set-follow").value),
+  emergency_stop: $("set-hotkey").value,
+  dry_run: $("set-dry-run").checked,
+  greet: $("set-greet").checked,
+  voice_check: $("set-voice-check").checked,
+  threshold: $("set-threshold").value,
 }));
 $("restart").addEventListener("click", () => {
   $("restart").hidden = true;
@@ -638,6 +925,8 @@ if (native) {
       { id: "task_manager", pack: "system", phrases: ["открой диспетчер задач"], action: "Нажать Ctrl+Shift+Esc", permission: "ask" },
       { id: "lock", pack: "system", phrases: ["заблокируй компьютер"], action: "Заблокировать компьютер", always_ask: true },
       { id: "shutdown", pack: "system", phrases: ["выключи компьютер"], action: "Выключить компьютер", always_ask: true },
+      { id: "my_otkroy_pochtu", pack: "my", phrases: ["открой почту", "запусти почту"], action: "откроет почту в браузере", permission: "ask", editable: true,
+        form: { id: "my_otkroy_pochtu", phrases: ["открой почту", "запусти почту"], description: "откроет почту в браузере", reply: "ok", always_ask: false, action: { type: "open_url", url: "https://mail.google.com", find_tab: ["Почта*", "Gmail*"] } } },
       { id: "game_mode", pack: "my", phrases: ["запусти игровой режим"], action: "Steam → вопрос «Во что хотите поиграть, сэр?»", permission: "never" },
     ],
     settings: {
@@ -652,11 +941,19 @@ if (native) {
       show_window: true,
       autostart: true,
       has_key: false,
+      follow_up_secs: 12,
+      emergency_stop: "Ctrl+Alt+F12",
+      dry_run: false,
+      greet: true,
+      voice_check: true,
+      thresholds: [{ value: "auto", label: "Как подобрано при записи образца" }, { value: "0.25", label: "Мягко — 0.25" }, { value: "0.50", label: "Строго — 0.50" }],
+      threshold: "auto",
     },
   });
   // ?state=listening&tab=commands — сразу нужный вид (для снимков макета).
   const query = new URLSearchParams(location.search);
   if (query.get("tab")) showTab(query.get("tab"));
+  if (query.get("edit")) openEditor(commands.find((c) => c.editable)?.form);
   if (query.get("state")) {
     document.documentElement.style.setProperty("--level", "0");
     document.body.classList.add("no-anim");

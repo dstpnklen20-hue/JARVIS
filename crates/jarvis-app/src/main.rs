@@ -3,6 +3,7 @@
 mod ask;
 mod bench;
 mod check;
+mod command_editor;
 mod core;
 mod daemon;
 mod enroll;

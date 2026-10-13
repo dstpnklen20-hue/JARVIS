@@ -85,6 +85,8 @@ pub enum CoreMsg {
     ReloadCommands,
     /// Главное окно просит список команд с разрешениями.
     WindowCommands,
+    /// Редактор команд изменил личный пакет — перечитать команды.
+    CommandsChanged,
     /// Главное окно: «ask» (сбросить решение), «always» или «never».
     SetPermission {
         id: String,
@@ -434,6 +436,10 @@ impl Core {
                 Ok(CoreMsg::EmergencyStop) => self.emergency_stop(Stop::Hotkey),
                 Ok(CoreMsg::ForgetPermissions) => self.forget_permissions("трей"),
                 Ok(CoreMsg::WindowCommands) => self.send_window_commands(),
+                Ok(CoreMsg::CommandsChanged) => {
+                    self.reload_commands("редактор команд");
+                    self.send_window_commands();
+                }
                 Ok(CoreMsg::SetPermission { id, value }) => {
                     self.set_permission(&id, &value);
                     self.send_window_commands();

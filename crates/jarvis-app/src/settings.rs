@@ -9,7 +9,10 @@
 use std::path::Path;
 
 use jarvis_core::Config;
-use jarvis_core::config::{DEFAULT_FILE, SYSTEM_DEFAULT_DEVICE, USER_FILE, VOLUME_RANGE, resolve};
+use jarvis_core::config::{
+    DEFAULT_FILE, FOLLOW_UP_SECS_RANGE, SYSTEM_DEFAULT_DEVICE, SpeakerThreshold, USER_FILE,
+    VOLUME_RANGE, resolve,
+};
 use jarvis_core::root::project_path;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -26,10 +29,33 @@ pub struct SettingsForm {
     pub volume: u32,
     pub llm: bool,
     pub show_window: bool,
+    /// Сколько секунд ждать следующую команду без «Джарвис».
+    pub follow_up_secs: u32,
+    /// Аварийная остановка («Ctrl+Alt+F12»; пусто — без клавиши).
+    pub emergency_stop: String,
+    /// Команды распознаются и пишутся в журнал, но не выполняются.
+    pub dry_run: bool,
+    pub greet: bool,
+    /// Откликаться только на ваш голос.
+    pub voice_check: bool,
+    /// Порог сходства голоса: «auto» или число 0.10–0.90.
+    pub threshold: String,
 }
+
+/// Строгость проверки голоса: варианты для окна.
+const THRESHOLDS: [(&str, &str); 6] = [
+    ("auto", "Как подобрано при записи образца"),
+    ("0.25", "Мягко — 0.25"),
+    ("0.30", "0.30"),
+    ("0.35", "0.35"),
+    ("0.40", "0.40"),
+    ("0.50", "Строго — 0.50"),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
+    #[error("горячая клавиша «{0}» не распознана (пример: Ctrl+Alt+F12)")]
+    Hotkey(String),
     #[error("«{value}» нет среди вариантов «{field}»")]
     Unknown { field: &'static str, value: String },
     #[error("не удалось прочитать {path}")]
@@ -121,6 +147,16 @@ pub fn settings_json(root: &Path, config: &Config, devices: &[String], autostart
         "show_window": config.llm.show_window,
         "autostart": autostart,
         "has_key": has_key,
+        "follow_up_secs": config.session.follow_up_secs,
+        "emergency_stop": config.hotkeys.emergency_stop,
+        "dry_run": config.general.dry_run,
+        "greet": config.general.greet_on_start,
+        "voice_check": config.speaker.verify,
+        "thresholds": THRESHOLDS
+            .iter()
+            .map(|(value, label)| json!({ "value": value, "label": label }))
+            .collect::<Vec<_>>(),
+        "threshold": threshold_text(&config.speaker.threshold),
     }})
 }
 
@@ -151,6 +187,21 @@ pub fn save(
     let volume = form.volume as f32 / 100.0;
     if !VOLUME_RANGE.contains(&volume) {
         return Err(unknown("громкость", &form.volume.to_string()));
+    }
+    if !FOLLOW_UP_SECS_RANGE.contains(&form.follow_up_secs) {
+        return Err(unknown(
+            "ожидание команды",
+            &form.follow_up_secs.to_string(),
+        ));
+    }
+    let hotkey = form.emergency_stop.trim();
+    if !hotkey.is_empty() && jarvis_platform::parse_hotkey(hotkey).is_err() {
+        return Err(SettingsError::Hotkey(hotkey.to_owned()));
+    }
+    if !THRESHOLDS.iter().any(|(value, _)| *value == form.threshold)
+        && threshold_text(&config.speaker.threshold) != form.threshold
+    {
+        return Err(unknown("строгость проверки голоса", &form.threshold));
     }
 
     let user_path = project_path(root, USER_FILE);
@@ -230,6 +281,40 @@ fn apply(
         set(&mut doc, "llm", "show_window", form.show_window.into())?;
         changed.push("окно ответа");
     }
+    if form.follow_up_secs != config.session.follow_up_secs {
+        set(
+            &mut doc,
+            "session",
+            "follow_up_secs",
+            i64::from(form.follow_up_secs).into(),
+        )?;
+        changed.push("ожидание команды");
+    }
+    let hotkey = form.emergency_stop.trim();
+    if hotkey != config.hotkeys.emergency_stop.trim() {
+        set(&mut doc, "hotkeys", "emergency_stop", hotkey.into())?;
+        changed.push("горячая клавиша");
+    }
+    if form.dry_run != config.general.dry_run {
+        set(&mut doc, "general", "dry_run", form.dry_run.into())?;
+        changed.push("режим отладки");
+    }
+    if form.greet != config.general.greet_on_start {
+        set(&mut doc, "general", "greet_on_start", form.greet.into())?;
+        changed.push("приветствие");
+    }
+    if form.voice_check != config.speaker.verify {
+        set(&mut doc, "speaker", "verify", form.voice_check.into())?;
+        changed.push("проверка голоса");
+    }
+    if form.threshold != threshold_text(&config.speaker.threshold) {
+        let value: toml_edit::Value = match form.threshold.parse::<f64>() {
+            Ok(number) => number.into(),
+            Err(_) => "auto".into(),
+        };
+        set(&mut doc, "speaker", "threshold", value)?;
+        changed.push("строгость проверки голоса");
+    }
     Ok((doc.to_string(), changed))
 }
 
@@ -257,6 +342,14 @@ fn set(
         }
     }
     Ok(())
+}
+
+/// Порог так, как его показывает окно: «auto» или «0.35».
+fn threshold_text(threshold: &SpeakerThreshold) -> String {
+    match threshold {
+        SpeakerThreshold::Auto => "auto".to_owned(),
+        SpeakerThreshold::Fixed(value) => format!("{value:.2}"),
+    }
 }
 
 fn unknown(field: &'static str, value: &str) -> SettingsError {
@@ -314,7 +407,42 @@ mod tests {
             volume: volume_percent(config.voice.volume),
             llm: config.llm.enabled,
             show_window: config.llm.show_window,
+            follow_up_secs: config.session.follow_up_secs,
+            emergency_stop: config.hotkeys.emergency_stop.clone(),
+            dry_run: config.general.dry_run,
+            greet: config.general.greet_on_start,
+            voice_check: config.speaker.verify,
+            threshold: threshold_text(&config.speaker.threshold),
         }
+    }
+
+    #[test]
+    fn new_settings_are_written_and_load() {
+        let cfg = config(USER);
+        let mut f = form(&cfg);
+        f.follow_up_secs = 20;
+        f.emergency_stop = "Ctrl+Alt+F11".into();
+        f.dry_run = true;
+        f.threshold = "0.40".into();
+        let (text, changed) = apply(USER, &cfg, &f).unwrap();
+        assert_eq!(
+            changed,
+            [
+                "ожидание команды",
+                "горячая клавиша",
+                "режим отладки",
+                "строгость проверки голоса"
+            ]
+        );
+        let new = config(&text);
+        assert_eq!(new.session.follow_up_secs, 20);
+        assert_eq!(new.hotkeys.emergency_stop, "Ctrl+Alt+F11");
+        assert!(new.general.dry_run);
+        assert_eq!(threshold_text(&new.speaker.threshold), "0.40");
+        // Обратно на «auto».
+        f.threshold = "auto".into();
+        let (text, _) = apply(&text, &new, &f).unwrap();
+        assert_eq!(threshold_text(&config(&text).speaker.threshold), "auto");
     }
 
     const USER: &str = "# Ваши настройки\n[voice]\npack = \"jarvis\"   # голос из фильма\n\n[llm]\nenabled = true    # мой ключ\n";

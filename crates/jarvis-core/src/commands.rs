@@ -388,6 +388,13 @@ pub struct Registry {
 impl Registry {
     /// Загружает все пакеты из `dir` (каждая подпапка с `command.toml`).
     pub fn load(dir: &Path) -> Self {
+        Self::load_with(dir, None)
+    }
+
+    /// Как [`Registry::load`], но манифест `path` берётся из `text`, а не с
+    /// диска (его может ещё не быть): проверка правки из редактора команд до
+    /// записи файла — со всеми проверками, включая дубли и ссылки между пакетами.
+    pub fn load_with(dir: &Path, replace: Option<(&Path, &str)>) -> Self {
         let mut registry = Registry::default();
         let mut manifests: Vec<PathBuf> = match std::fs::read_dir(dir) {
             Ok(entries) => entries
@@ -402,8 +409,19 @@ impl Registry {
                 return registry;
             }
         };
+        if let Some((path, _)) = replace
+            && !manifests.iter().any(|m| m == path)
+        {
+            manifests.push(path.to_path_buf());
+        }
         manifests.sort();
         for path in manifests {
+            if let Some((replaced, text)) = replace
+                && replaced == path
+            {
+                registry.add_manifest(&path, text);
+                continue;
+            }
             match std::fs::read_to_string(&path) {
                 Ok(text) => registry.add_manifest(&path, &text),
                 Err(e) => registry.errors.push(LoadProblem {

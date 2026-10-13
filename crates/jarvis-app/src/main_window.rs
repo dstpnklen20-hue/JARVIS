@@ -55,6 +55,13 @@ pub enum PageMsg {
     Settings(Value),
     /// «Перезапустить» после сохранения настроек.
     Restart,
+    /// Редактор команд: сохранить (поля — `command_editor::CommandForm`).
+    SaveCommand(Value),
+    DeleteCommand {
+        id: String,
+    },
+    /// «Выбрать…» у пути программы.
+    PickProgram,
 }
 
 impl PageMsg {
@@ -68,6 +75,9 @@ impl PageMsg {
             PageMsg::ApiKey { .. } => "api_key",
             PageMsg::Settings(_) => "settings",
             PageMsg::Restart => "restart",
+            PageMsg::SaveCommand(_) => "save_command",
+            PageMsg::DeleteCommand { .. } => "delete_command",
+            PageMsg::PickProgram => "pick_program",
         }
     }
 }
@@ -124,6 +134,11 @@ impl MainWindow {
 
     pub fn bring_to_front(&self) {
         self.window.bring_to_front();
+    }
+
+    /// Окно выбора программы поверх главного.
+    pub fn pick_program(&self) -> Option<std::path::PathBuf> {
+        self.window.pick_program()
     }
 
     /// Сообщения страницы с прошлого раза.
@@ -293,6 +308,7 @@ pub fn commands_json(registry: &Registry, permissions: &PermissionStore) -> Valu
                     offer_always: false
                 }
             );
+            let form = crate::command_editor::form_of(c);
             json!({
                 "id": c.id,
                 "pack": c.pack,
@@ -300,6 +316,8 @@ pub fn commands_json(registry: &Registry, permissions: &PermissionStore) -> Valu
                 "action": c.description,
                 "permission": permission,
                 "always_ask": locked,
+                "editable": form.is_some(),
+                "form": form,
             })
         })
         .collect();
@@ -368,6 +386,31 @@ mod tests {
             matches!(msg, PageMsg::Permission { ref id, ref value } if id == "open_youtube" && value == "always")
         );
         assert!(serde_json::from_str::<PageMsg>(r#"{"type":"rm -rf"}"#).is_err());
+    }
+
+    #[test]
+    fn form_messages_reach_forms_without_type_field() {
+        // Формы запрещают лишние поля: тег сообщения не должен в них попасть.
+        let msg: PageMsg = serde_json::from_str(
+            r#"{"type":"settings","mic":"default","pack":"jarvis","tts":"dmitri","volume":100,"llm":true,"show_window":true,"follow_up_secs":12,"emergency_stop":"Ctrl+Alt+F12","dry_run":false,"greet":true,"voice_check":true,"threshold":"auto"}"#,
+        )
+        .unwrap();
+        let PageMsg::Settings(values) = msg else {
+            panic!("ожидали Settings");
+        };
+        let form: crate::settings::SettingsForm = serde_json::from_value(values).unwrap();
+        assert_eq!(form.pack, "jarvis");
+
+        let msg: PageMsg = serde_json::from_str(
+            r#"{"type":"save_command","phrases":["открой почту"],"description":"откроет почту","always_ask":false,"reply":"ok","action":{"type":"open_url","url":"https://mail.google.com","find_tab":[]}}"#,
+        )
+        .unwrap();
+        let PageMsg::SaveCommand(values) = msg else {
+            panic!("ожидали SaveCommand");
+        };
+        let form: crate::command_editor::CommandForm = serde_json::from_value(values).unwrap();
+        assert_eq!(form.phrases, ["открой почту"]);
+        assert!(form.id.is_none());
     }
 
     #[test]

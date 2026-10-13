@@ -145,6 +145,7 @@ pub fn run(root: &Path, config: Config, restart: bool) -> anyhow::Result<()> {
 
     let (core_tx, core_rx) = mpsc::channel::<CoreMsg>();
     let window_config = config.clone();
+    let editor_dir = resolve(root, &config.paths.commands);
     let webview_dir = resolve(root, &config.paths.data).join("webview");
     let commands_dir = resolve(root, &config.paths.commands);
     let wake_matcher = hearing.matcher.clone();
@@ -253,6 +254,31 @@ pub fn run(root: &Path, config: Config, restart: bool) -> anyhow::Result<()> {
                     PageMsg::Settings(values) => {
                         let note = save_settings(root, &window_config, values);
                         w.update(&note);
+                    }
+                    PageMsg::SaveCommand(values) => {
+                        let reply = save_command(&editor_dir, values);
+                        if reply["editor"]["ok"] == true {
+                            let _ = core_tx.send(CoreMsg::CommandsChanged);
+                        }
+                        w.update(&reply);
+                    }
+                    PageMsg::DeleteCommand { id } => {
+                        let reply = match crate::command_editor::delete(&editor_dir, &id) {
+                            Ok(()) => {
+                                tracing::info!(%id, "команда удалена в окне");
+                                let _ = core_tx.send(CoreMsg::CommandsChanged);
+                                json!({ "editor": { "ok": true, "note": "Команда удалена" } })
+                            }
+                            Err(e) => {
+                                json!({ "editor": { "error": jarvis_core::error_chain(&e) } })
+                            }
+                        };
+                        w.update(&reply);
+                    }
+                    PageMsg::PickProgram => {
+                        if let Some(path) = w.pick_program() {
+                            w.update(&json!({ "picked": path.display().to_string() }));
+                        }
                     }
                     PageMsg::Restart => match spawn_restart() {
                         Ok(()) => tracing::info!("перезапуск из окна настроек"),
@@ -395,6 +421,33 @@ fn save_settings(root: &Path, config: &Config, values: serde_json::Value) -> ser
             let why = jarvis_core::error_chain(&e);
             tracing::warn!(error = %why, "настройки не сохранены");
             json!({ "note": format!("Не сохранено: {why}") })
+        }
+    }
+}
+
+/// «Сохранить» в редакторе команд: записать личный пакет, вернуть ответ окну.
+fn save_command(commands_dir: &Path, values: serde_json::Value) -> serde_json::Value {
+    let form: crate::command_editor::CommandForm = match serde_json::from_value(values) {
+        Ok(form) => form,
+        Err(e) => {
+            tracing::warn!(error = %e, "окно прислало непонятную команду");
+            return json!({ "editor": { "error": "окно прислало непонятные данные" } });
+        }
+    };
+    match crate::command_editor::save(commands_dir, &form) {
+        Ok(saved) => {
+            tracing::info!(id = %saved.id, "команда сохранена в окне");
+            let note = if saved.warnings.is_empty() {
+                "Сохранено. Джарвис спросит разрешение при первом запуске".to_owned()
+            } else {
+                format!("Сохранено, но: {}", saved.warnings.join("; "))
+            };
+            json!({ "editor": { "ok": true, "note": note } })
+        }
+        Err(e) => {
+            let why = jarvis_core::error_chain(&e);
+            tracing::info!(error = %why, "команда не сохранена");
+            json!({ "editor": { "error": why } })
         }
     }
 }
