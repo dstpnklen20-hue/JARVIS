@@ -10,6 +10,7 @@
 //! (ядро зовёт его на «Джарвис», пока человек договаривает команду) загружает
 //! его заранее, а после [`IDLE_UNLOAD`] без фраз он выгружается.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -51,6 +52,8 @@ enum Request {
     Say {
         id: u64,
         text: String,
+        /// Предложение ответа нейросети: не пропускать, озвучить по порядку.
+        ordered: bool,
     },
     /// Скоро может понадобиться — загрузить голос заранее.
     Prepare,
@@ -87,8 +90,22 @@ impl Speech {
         Ok(Self { requests })
     }
 
+    /// Фраза: если за время синтеза попросили новую — эта уже не нужна.
     pub fn say(&self, id: u64, text: String) {
-        let _ = self.requests.send(Request::Say { id, text });
+        let _ = self.requests.send(Request::Say {
+            id,
+            text,
+            ordered: false,
+        });
+    }
+
+    /// Предложение ответа: все озвучиваются по порядку, ни одно не пропускается.
+    pub fn say_sentence(&self, id: u64, text: String) {
+        let _ = self.requests.send(Request::Say {
+            id,
+            text,
+            ordered: true,
+        });
     }
 
     pub fn prepare(&self) {
@@ -117,33 +134,44 @@ fn worker(
         load_time: started.elapsed(),
     });
     let mut cache = Cache::default();
+    let mut pending: VecDeque<(u64, String, bool)> = VecDeque::new();
     loop {
-        let request = if tts.is_some() {
-            match rx.recv_timeout(idle_unload) {
-                Ok(r) => r,
-                Err(RecvTimeoutError::Timeout) => {
-                    tts = None;
-                    tracing::debug!("голос синтеза выгружен до следующей фразы");
-                    continue;
+        let mut prepare = false;
+        if pending.is_empty() {
+            let request = if tts.is_some() {
+                match rx.recv_timeout(idle_unload) {
+                    Ok(r) => r,
+                    Err(RecvTimeoutError::Timeout) => {
+                        tts = None;
+                        tracing::debug!("голос синтеза выгружен до следующей фразы");
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return,
                 }
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        } else {
-            match rx.recv() {
-                Ok(r) => r,
-                Err(_) => return,
-            }
-        };
-        // Пока синтезировали прошлую фразу, ядро могло попросить новые —
-        // нужна только последняя.
-        let mut say = match request {
-            Request::Say { id, text } => Some((id, text)),
-            Request::Prepare => None,
-        };
+            } else {
+                match rx.recv() {
+                    Ok(r) => r,
+                    Err(_) => return,
+                }
+            };
+            queue(request, &mut pending, &mut prepare);
+        }
+        // Пока синтезировали прошлую фразу, ядро могло попросить новые.
         while let Ok(newer) = rx.try_recv() {
-            if let Request::Say { id, text } = newer {
-                say = Some((id, text));
-            }
+            queue(newer, &mut pending, &mut prepare);
+        }
+        // Из обычных фраз нужна только последняя; предложения ответа — все.
+        if let Some(last) = pending.iter().rposition(|(_, _, ordered)| !ordered) {
+            let mut i = 0;
+            pending.retain(|(_, _, ordered)| {
+                let keep = *ordered || i == last;
+                i += 1;
+                keep
+            });
+        }
+        let say = pending.pop_front().map(|(id, text, _)| (id, text));
+        if say.is_none() && !prepare {
+            continue;
         }
         let started = Instant::now();
         if say.as_ref().is_some_and(|(_, text)| cache.peek(text)) {
@@ -190,6 +218,13 @@ fn worker(
                 why: jarvis_core::error_chain(&e),
             },
         });
+    }
+}
+
+fn queue(request: Request, pending: &mut VecDeque<(u64, String, bool)>, prepare: &mut bool) {
+    match request {
+        Request::Say { id, text, ordered } => pending.push_back((id, text, ordered)),
+        Request::Prepare => *prepare = true,
     }
 }
 
@@ -361,6 +396,26 @@ mod tests {
         speech.say(4, "четыре".into());
         assert_eq!(next_clip(&rx), 4);
         assert_eq!(loads.load(Ordering::SeqCst), 3, "prepare загружает заранее");
+    }
+
+    #[test]
+    fn sentences_are_all_spoken_in_order_phrases_only_latest() {
+        let (speech, rx, _) = spawn_fake(Duration::from_secs(30));
+        // Голос ещё грузится — всё копится в очереди.
+        speech.say(10, "старая фраза".into());
+        speech.say_sentence(1, "Первое предложение.".into());
+        speech.say_sentence(2, "Второе предложение.".into());
+        speech.say(11, "новая фраза".into());
+        speech.say_sentence(3, "Третье предложение.".into());
+        let mut got: Vec<u64> = (0..4).map(|_| next_clip(&rx)).collect();
+        // Первая могла успеть уйти в синтез до остальных.
+        if got[0] == 10 {
+            got.remove(0);
+            got.push(next_clip(&rx));
+        }
+        let sentences: Vec<u64> = got.iter().copied().filter(|id| *id < 10).collect();
+        assert_eq!(sentences, [1, 2, 3], "{got:?}");
+        assert!(got.contains(&11), "{got:?}");
     }
 
     #[test]

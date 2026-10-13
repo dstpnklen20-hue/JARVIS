@@ -1,6 +1,8 @@
 //! Ядро: автомат состояний, команды, разрешения, журнал, звук ответа.
 //! Работает в потоке `jarvis-core`; события приходят через канал.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -10,6 +12,8 @@ use std::path::PathBuf;
 
 use anyhow::Context as _;
 use jarvis_actions::{ActionError, CancelToken, Outcome, Question, Sound, System};
+use jarvis_app::answer::{SpeechQueue, thinking_cue_due};
+use jarvis_app::brain::{Brain, BrainEvent, Failure, ModelFactory, slot_values, tool_commands};
 use jarvis_app::resolver::{
     BUILTIN_DIALOG_OFF, BUILTIN_DIALOG_ON, BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS,
     BUILTIN_STOP, CommandResolver, EXACT_SCORE, EarlyDecider, Resolution, hotword_phrases,
@@ -23,12 +27,17 @@ use jarvis_audio::player::Player;
 use jarvis_audio::stt::Transcript;
 use jarvis_audio::tts::VoiceModel;
 use jarvis_audio::wake::WakeMatcher;
+use jarvis_audio::wav::Clip;
 use jarvis_core::Config;
 use jarvis_core::commands::{ActionSpec, Command, Registry, ReplyChoice};
 use jarvis_core::journal::{self, ActionJournal, AnswerSource, Entry, PermissionNote};
 use jarvis_core::permissions::{Answer, PermissionStore, Verdict};
 use jarvis_core::slots::SlotValues;
 use jarvis_core::state::{Effect, Event, Reply, State, Timings, transition};
+use jarvis_llm::claude::{ClaudeClient, ClaudeSettings};
+use jarvis_llm::conversation::ToolOutcome;
+use jarvis_llm::tools::CommandRequest;
+use jarvis_llm::{LanguageModel, LlmError};
 use jarvis_nlu::answers::{PermissionReply, parse_reply};
 use jarvis_nlu::{CommandMatcher, CommandPhrases, MatchResult, Thresholds};
 use jarvis_platform::{DialogButton, DialogHandle, DialogSpec, Waker};
@@ -43,6 +52,10 @@ const ECHO_TAIL: Duration = Duration::from_millis(150);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(10);
 /// Сколько ждём ответа на вопрос-разрешение (раздел 2.1 ТЗ).
 const ASK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Номера предложений ответа нейросети — отдельно от номеров обычных фраз.
+const SENTENCE_ID_BASE: u64 = 1 << 48;
+/// Нейросеть молчит дольше — считать ответ сорвавшимся.
+const ANSWER_DEADLINE: Duration = Duration::from_secs(120);
 
 const BUTTON_YES: i32 = 100;
 const BUTTON_ALWAYS: i32 = 101;
@@ -64,6 +77,8 @@ pub enum CoreMsg {
     PlaySound(Sound),
     /// Поток синтеза речи.
     Speech(SpeechEvent),
+    /// Поток нейросети.
+    Brain(BrainEvent),
     TogglePause,
     EmergencyStop,
     ForgetPermissions,
@@ -145,6 +160,22 @@ impl Choice {
             _ => None,
         }
     }
+}
+
+/// Текущий ответ нейросети.
+struct AnswerTurn {
+    generation: u64,
+    question: String,
+    asked: Instant,
+    queue: SpeechQueue<Arc<Clip>>,
+    next_sentence: u64,
+    /// Уже зазвучало хоть что-то (ответ или «Секунду, сэр»).
+    spoken: bool,
+    cue_played: bool,
+    /// Нейросеть закончила (ответом или ошибкой).
+    done: bool,
+    failure: Option<Failure>,
+    commands: Vec<CommandRequest>,
 }
 
 /// Откуда аварийная остановка.
@@ -278,6 +309,18 @@ pub struct Core {
     /// Ждём ответ на вопрос команды (`ask`).
     choice: Option<Choice>,
     warn_elevated: bool,
+    /// Нейросеть (`llm.enabled`).
+    brain: Option<Brain>,
+    answer: Option<AnswerTurn>,
+    /// Номер вопроса: события старого ответа — в никуда.
+    llm_generation: u64,
+    /// Сразу после ответа нейросети фраза без «Джарвис» — тоже вопрос (до IDLE).
+    llm_follow_up: bool,
+    /// Команды, которые попросила нейросеть, — по одной.
+    llm_commands: VecDeque<CommandRequest>,
+    /// Номер вызова команды нейросети, которая сейчас выполняется: её итог
+    /// (из журнала) уходит нейросети.
+    llm_tool: RefCell<Option<String>>,
 }
 
 impl Core {
@@ -308,6 +351,12 @@ impl Core {
             .inspect_err(|e| tracing::error!(error = %e, "не удалось запустить поток синтеза"))
             .ok()
         });
+        let brain = p
+            .config
+            .llm
+            .enabled
+            .then(|| spawn_brain(&p.config, &p.registry, events.clone()))
+            .flatten();
         let nlu = &p.config.nlu;
         Ok(Self {
             state: State::Idle,
@@ -356,6 +405,12 @@ impl Core {
             greeted: false,
             choice: None,
             warn_elevated: p.elevated,
+            brain,
+            answer: None,
+            llm_generation: 0,
+            llm_follow_up: false,
+            llm_commands: VecDeque::new(),
+            llm_tool: RefCell::new(None),
         })
     }
 
@@ -372,6 +427,7 @@ impl Core {
                 }
                 Ok(CoreMsg::PlaySound(sound)) => self.play_sound(&sound),
                 Ok(CoreMsg::Speech(event)) => self.on_speech(event),
+                Ok(CoreMsg::Brain(event)) => self.on_brain(event),
                 Ok(CoreMsg::Pipeline(event)) => self.on_pipeline(event),
                 Ok(CoreMsg::ActionDone { generation, result }) => {
                     self.on_action_done(generation, result)
@@ -401,6 +457,8 @@ impl Core {
             let score = self.early_score();
             self.command(id, String::new(), score, SlotValues::new(), now);
         }
+        self.tick_answer(now);
+        self.next_llm_command(now);
         if let Some(running) = &self.executing
             && running.started.elapsed() > running.deadline
         {
@@ -599,6 +657,10 @@ impl Core {
                 self.clarifying = false;
             }
             Resolution::NotUnderstood { best } => {
+                if self.wants_llm(&t.text) {
+                    self.ask_llm(&t.text, now);
+                    return;
+                }
                 tracing::info!(?best, "не понял");
                 self.apply(Event::NotUnderstood);
             }
@@ -988,6 +1050,237 @@ impl Core {
         self.play_sound(&Sound::File(question.sound.clone()));
     }
 
+    // ---------- нейросеть ----------
+
+    /// Отдать ли фразу нейросети: она включена, фраза прозвучала после
+    /// «Джарвис» (или сразу после её ответа) и в ней достаточно слов.
+    fn wants_llm(&self, text: &str) -> bool {
+        let after_wake = matches!(self.state, State::Listening { .. })
+            || (self.llm_follow_up && matches!(self.state, State::FollowUp { .. }));
+        let words = self.resolver.strip_wake(text).split_whitespace().count();
+        self.brain.is_some() && after_wake && words >= self.config.llm.min_words as usize
+    }
+
+    fn ask_llm(&mut self, text: &str, now: Instant) {
+        let question = self.resolver.strip_wake(text);
+        let Some(brain) = &self.brain else {
+            return;
+        };
+        self.llm_generation += 1;
+        let generation = self.llm_generation;
+        tracing::info!(%question, "вопрос нейросети");
+        brain.ask(generation, question.clone());
+        if let Some(speech) = &self.speech {
+            speech.prepare();
+        }
+        self.answer = Some(AnswerTurn {
+            generation,
+            question,
+            asked: now,
+            queue: SpeechQueue::default(),
+            next_sentence: SENTENCE_ID_BASE,
+            spoken: false,
+            cue_played: false,
+            done: false,
+            failure: None,
+            commands: Vec::new(),
+        });
+        self.apply(Event::Question);
+    }
+
+    fn on_brain(&mut self, event: BrainEvent) {
+        let current = |generation: u64, answer: &Option<AnswerTurn>| {
+            answer.as_ref().is_some_and(|a| a.generation == generation)
+        };
+        match event {
+            BrainEvent::Sentence { generation, text } if current(generation, &self.answer) => {
+                let Some(speech) = self.speech.as_ref().filter(|_| self.speech_ready) else {
+                    tracing::warn!("голоса синтеза нет — ответ только текстом в журнале");
+                    return;
+                };
+                if let Some(answer) = self.answer.as_mut() {
+                    answer.next_sentence += 1;
+                    answer.queue.expect(answer.next_sentence);
+                    speech.say_sentence(answer.next_sentence, text);
+                }
+            }
+            BrainEvent::Text { .. } => {}
+            BrainEvent::Done {
+                generation,
+                commands,
+            } if current(generation, &self.answer) => {
+                if let Some(answer) = self.answer.as_mut() {
+                    answer.done = true;
+                    answer.commands = commands;
+                }
+            }
+            BrainEvent::Failed {
+                generation,
+                failure,
+            } if current(generation, &self.answer) => {
+                tracing::warn!(?failure, "нейросеть не ответила");
+                self.say_failure(&failure);
+                if let Some(answer) = self.answer.as_mut() {
+                    answer.done = true;
+                    answer.failure = Some(failure);
+                }
+            }
+            _ => {} // устаревший ответ
+        }
+    }
+
+    /// Что сказать, если ответа нет.
+    fn say_failure(&mut self, failure: &Failure) {
+        let text = match failure {
+            Failure::Offline => {
+                self.play_in_answer(Reply::Offline);
+                return;
+            }
+            Failure::NoKey => "Сэр, ключ доступа к нейросети не настроен.",
+            Failure::BadKey => "Сэр, сервер не принял ключ доступа к нейросети.",
+            Failure::Busy => "Сервер нейросети перегружен, сэр. Попробуйте чуть позже.",
+            Failure::Refused => "Боюсь, на это я не отвечу, сэр.",
+            Failure::Other(_) => {
+                self.play_in_answer(Reply::Failed);
+                return;
+            }
+        };
+        if !self.speak(text.to_owned(), Purpose::Notice) {
+            self.play_in_answer(Reply::Failed);
+        }
+    }
+
+    /// Ответ из пакета внутри ответа нейросети: следующее предложение
+    /// подождёт, пока он прозвучит.
+    fn play_in_answer(&mut self, reply: Reply) {
+        let reply = match reply.fallback() {
+            Some(fallback) if self.pack.variants(reply).is_empty() => fallback,
+            _ => reply,
+        };
+        if self.pack.variants(reply).is_empty() {
+            return;
+        }
+        if let Some(duration) = self.player.play(reply) {
+            self.muted_for(duration);
+            if let Some(answer) = self.answer.as_mut() {
+                answer.queue.playing(Instant::now(), duration);
+                answer.spoken = true;
+            }
+        }
+    }
+
+    /// Такт ответа: «Секунду, сэр», следующее предложение, конец ответа.
+    fn tick_answer(&mut self, now: Instant) {
+        let Some(answer) = self.answer.as_ref() else {
+            return;
+        };
+        if !answer.done && now.duration_since(answer.asked) > ANSWER_DEADLINE {
+            self.on_brain(BrainEvent::Failed {
+                generation: answer.generation,
+                failure: Failure::Other("нейросеть не ответила вовремя".into()),
+            });
+            return;
+        }
+        if !answer.cue_played && thinking_cue_due(answer.asked, now, answer.spoken, answer.done) {
+            if let Some(answer) = self.answer.as_mut() {
+                answer.cue_played = true;
+            }
+            self.play_in_answer(Reply::Thinking);
+        }
+        let Some(answer) = self.answer.as_mut() else {
+            return;
+        };
+        if let Some(clip) = answer.queue.next(now) {
+            match self.player.play_clip(&clip) {
+                Ok(duration) => {
+                    self.gate.mute_for(duration + ECHO_TAIL);
+                    self.spoke_pending += duration + ECHO_TAIL;
+                    answer.queue.playing(now, duration);
+                    if !std::mem::replace(&mut answer.spoken, true) {
+                        tracing::info!(
+                            ms = now.duration_since(answer.asked).as_millis() as u64,
+                            "ответ нейросети зазвучал"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %jarvis_core::error_chain(&e), "не удалось проиграть ответ")
+                }
+            }
+        }
+        if answer.done && answer.queue.idle(now) {
+            self.finish_answer();
+        }
+    }
+
+    fn finish_answer(&mut self) {
+        let Some(answer) = self.answer.take() else {
+            return;
+        };
+        let error = answer.failure.as_ref().map(|f| format!("{f:?}"));
+        self.journal_answer(&answer, error);
+        if answer.failure.is_none() {
+            self.llm_follow_up = true;
+            self.llm_commands.extend(answer.commands);
+        }
+        self.apply(Event::ActionFinished { reply: None });
+    }
+
+    fn journal_answer(&self, answer: &AnswerTurn, error: Option<String>) {
+        let approval = Approval {
+            heard: Heard {
+                text: answer.question.clone(),
+                score: 1.0,
+                slots: SlotValues::new(),
+                at: answer.asked,
+            },
+            note: PermissionNote::Builtin,
+            answered_by: None,
+        };
+        let result = if error.is_some() { "failed" } else { "ok" };
+        self.write_journal(&approval, LLM_JOURNAL_ID, result, error);
+    }
+
+    /// Следующая команда, которую попросила нейросеть, — когда Джарвис свободен.
+    fn next_llm_command(&mut self, now: Instant) {
+        let free = self.answer.is_none()
+            && self.executing.is_none()
+            && self.pending.is_none()
+            && self.state.accepts_commands();
+        if !free {
+            return;
+        }
+        let Some(request) = self.llm_commands.pop_front() else {
+            return;
+        };
+        let checked = self
+            .registry
+            .get(&request.command)
+            .ok_or_else(|| "такой команды больше нет".to_owned())
+            .and_then(|c| slot_values(c, request.value.as_deref()));
+        match checked {
+            Ok(slots) => {
+                tracing::info!(command = %request.command, "команда по просьбе нейросети");
+                *self.llm_tool.borrow_mut() = Some(request.tool_use_id);
+                let text = format!(
+                    "нейросеть: {}",
+                    spoken_phrase(&self.registry, &request.command)
+                );
+                self.command(request.command, text, 1.0, slots, now);
+            }
+            Err(why) => {
+                tracing::warn!(command = %request.command, %why, "команда нейросети отклонена");
+                if let Some(brain) = &self.brain {
+                    brain.outcome(ToolOutcome {
+                        tool_use_id: request.tool_use_id,
+                        text: format!("Не выполнено: {why}."),
+                        is_error: true,
+                    });
+                }
+            }
+        }
+    }
+
     // ---------- аварийная остановка и прочее ----------
 
     fn emergency_stop(&mut self, stop: Stop) {
@@ -1048,6 +1341,9 @@ impl Core {
             self.pipeline
                 .set_hotwords(hotword_phrases(&registry, &self.config.wake.words));
         }
+        if let Some(brain) = &self.brain {
+            brain.set_commands(tool_commands(&registry));
+        }
         self.registry = registry;
         true
     }
@@ -1072,6 +1368,27 @@ impl Core {
         result: &'static str,
         error: Option<String>,
     ) {
+        // Команду просила нейросеть — сообщить ей итог.
+        if command != LLM_JOURNAL_ID
+            && let Some(tool_use_id) = self.llm_tool.borrow_mut().take()
+            && let Some(brain) = &self.brain
+        {
+            brain.outcome(ToolOutcome {
+                tool_use_id,
+                text: match result {
+                    "ok" => "Выполнено.".to_owned(),
+                    "not_executed" => "Не выполнено: пользователь не разрешил.".to_owned(),
+                    _ => format!(
+                        "Не удалось{}.",
+                        error
+                            .as_deref()
+                            .map(|e| format!(": {e}"))
+                            .unwrap_or_default()
+                    ),
+                },
+                is_error: result != "ok",
+            });
+        }
         let Some(journal) = &self.journal else {
             return;
         };
@@ -1216,6 +1533,12 @@ impl Core {
                 clip,
                 synth_time,
             } => {
+                // Предложение ответа нейросети — в очередь, звучит по порядку.
+                if let Some(answer) = self.answer.as_mut()
+                    && answer.queue.ready(id, Arc::clone(&clip))
+                {
+                    return;
+                }
                 let Some(purpose) = self.take_speaking(id) else {
                     return;
                 };
@@ -1240,6 +1563,13 @@ impl Core {
                 }
             }
             SpeechEvent::Failed { id, why } => {
+                if let Some(answer) = self.answer.as_mut()
+                    && answer.queue.contains(id)
+                {
+                    tracing::warn!(%why, "предложение ответа не озвучено");
+                    answer.queue.failed(id);
+                    return;
+                }
                 if let Some(purpose) = self.take_speaking(id) {
                     tracing::error!(%why, ?purpose, "синтез не удался");
                     self.speech_fallback(purpose);
@@ -1321,8 +1651,19 @@ impl Core {
                     self.executing = None;
                     self.approval = None;
                     self.early.clear();
+                    // Ответ нейросети — прервать, недоговорённое и её команды — забыть.
+                    if let Some(brain) = &self.brain {
+                        brain.cancel();
+                    }
+                    if let Some(answer) = self.answer.take() {
+                        self.journal_answer(&answer, Some("аварийная остановка".into()));
+                    }
+                    self.llm_commands.clear();
                 }
             }
+        }
+        if matches!(self.state, State::Idle | State::Paused) {
+            self.llm_follow_up = false;
         }
         // Режим диалога кончился (выход, тайм-аут, стоп, пауза) — забыть его.
         if matches!(self.state, State::Idle | State::Paused) && self.timings.dialog.is_some() {
@@ -1361,6 +1702,38 @@ impl Core {
             self.waker.wake();
         }
     }
+}
+
+/// Имя «команды» вопроса нейросети в журнале действий.
+const LLM_JOURNAL_ID: &str = "llm";
+
+/// Поток нейросети: ключ — из хранилища ОС при первом вопросе.
+fn spawn_brain(config: &Config, registry: &Registry, events: Sender<CoreMsg>) -> Option<Brain> {
+    let llm = &config.llm;
+    let settings = ClaudeSettings {
+        model: llm.model.clone(),
+        effort: llm.effort.clone(),
+        max_tokens: llm.max_tokens,
+        thinking: llm.thinking.clone(),
+        fallback: llm.fallback,
+    };
+    let factory: ModelFactory = Box::new(move || {
+        let key = jarvis_llm::secrets::api_key()?.ok_or(LlmError::NoKey)?;
+        let client = ClaudeClient::new(key, settings.clone())?;
+        Ok(Box::new(client) as Box<dyn LanguageModel>)
+    });
+    let memory = Duration::from_secs(u64::from(llm.memory_mins) * 60);
+    tracing::info!(model = %llm.model, effort = %llm.effort, "нейросеть включена");
+    Brain::spawn(
+        factory,
+        tool_commands(registry),
+        memory,
+        Box::new(move |event| {
+            let _ = events.send(CoreMsg::Brain(event));
+        }),
+    )
+    .inspect_err(|e| tracing::error!(error = %e, "не удалось запустить поток нейросети"))
+    .ok()
 }
 
 /// Текст окна-вопроса: что именно произойдёт (раздел 2.1 ТЗ) — с уже

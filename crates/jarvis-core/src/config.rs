@@ -47,6 +47,7 @@ pub struct Config {
     pub voice: Voice,
     pub hotkeys: Hotkeys,
     pub session: Session,
+    pub llm: Llm,
     pub logging: Logging,
     pub paths: Paths,
 }
@@ -189,6 +190,36 @@ impl Audio {
         }
     }
 }
+
+/// LLM-мозг (этап 7): ответы на свободные вопросы после «Джарвис».
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Llm {
+    pub enabled: bool,
+    pub model: String,
+    /// `low`, `medium`, `high`.
+    pub effort: String,
+    /// `adaptive` или `between_tools` (без раздумий).
+    pub thinking: String,
+    pub max_tokens: u32,
+    /// Отвечать ли запасной моделью, если основная откажет по своим правилам.
+    pub fallback: bool,
+    /// Сколько минут помнить разговор.
+    pub memory_mins: u32,
+    /// Сколько слов должно быть во фразе, чтобы она ушла в нейросеть.
+    pub min_words: u32,
+    /// Показывать текст ответа в окне.
+    pub show_window: bool,
+    /// Через сколько секунд после ответа окно закрывается само.
+    pub window_secs: u32,
+}
+
+pub const LLM_EFFORTS: [&str; 3] = ["low", "medium", "high"];
+pub const LLM_THINKING: [&str; 2] = ["adaptive", "between_tools"];
+pub const LLM_MAX_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 256..=8192;
+pub const LLM_MEMORY_MINS_RANGE: std::ops::RangeInclusive<u32> = 1..=60;
+pub const LLM_MIN_WORDS_RANGE: std::ops::RangeInclusive<u32> = 1..=10;
+pub const LLM_WINDOW_SECS_RANGE: std::ops::RangeInclusive<u32> = 3..=300;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -415,6 +446,58 @@ impl Config {
             TTS_SPEED_RANGE.contains(&self.voice.tts_speed),
             "voice.tts_speed",
             out_of_range(self.voice.tts_speed, &TTS_SPEED_RANGE),
+        );
+        check(
+            self.llm.model.trim().starts_with("claude-")
+                && !self.llm.model.contains(char::is_whitespace),
+            "llm.model",
+            format!(
+                "«{}» — нужен id модели Claude, например claude-sonnet-5-5",
+                self.llm.model
+            ),
+        );
+        check(
+            LLM_EFFORTS.contains(&self.llm.effort.as_str()),
+            "llm.effort",
+            format!(
+                "«{}» — одно из: {}",
+                self.llm.effort,
+                LLM_EFFORTS.join(", ")
+            ),
+        );
+        check(
+            LLM_THINKING.contains(&self.llm.thinking.as_str()),
+            "llm.thinking",
+            format!(
+                "«{}» — одно из: {}",
+                self.llm.thinking,
+                LLM_THINKING.join(", ")
+            ),
+        );
+        check(
+            self.llm.thinking != "between_tools" || self.llm.model.contains("sonnet-5-5"),
+            "llm.thinking",
+            "between_tools есть только у claude-sonnet-5-5".into(),
+        );
+        check(
+            LLM_MAX_TOKENS_RANGE.contains(&self.llm.max_tokens),
+            "llm.max_tokens",
+            out_of_range(self.llm.max_tokens, &LLM_MAX_TOKENS_RANGE),
+        );
+        check(
+            LLM_MEMORY_MINS_RANGE.contains(&self.llm.memory_mins),
+            "llm.memory_mins",
+            out_of_range(self.llm.memory_mins, &LLM_MEMORY_MINS_RANGE),
+        );
+        check(
+            LLM_MIN_WORDS_RANGE.contains(&self.llm.min_words),
+            "llm.min_words",
+            out_of_range(self.llm.min_words, &LLM_MIN_WORDS_RANGE),
+        );
+        check(
+            LLM_WINDOW_SECS_RANGE.contains(&self.llm.window_secs),
+            "llm.window_secs",
+            out_of_range(self.llm.window_secs, &LLM_WINDOW_SECS_RANGE),
         );
         check(
             DIALOG_IDLE_MINS_RANGE.contains(&self.session.dialog_idle_mins),

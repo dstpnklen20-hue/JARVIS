@@ -141,6 +141,7 @@ fn collect(explicit_root: Option<&Path>) -> (String, Vec<Item>) {
         items.push(check_voiceprint(&root, config));
         items.push(check_commands(&root, config));
         items.push(check_permissions(&root));
+        items.push(check_llm(config));
         items.push(match crate::daemon::check_hotkey(config) {
             Ok(Some(spec)) => Item::new(
                 Status::Ok,
@@ -315,6 +316,30 @@ fn check_commands(root: &Path, config: &Config) -> Item {
         (false, true, true) => Status::Ok,
     };
     Item::new(status, TITLE, summary).with_notes(notes)
+}
+
+fn check_llm(config: &Config) -> Item {
+    const TITLE: &str = "Нейросеть";
+    let key = jarvis_llm::secrets::api_key();
+    let key_text = match &key {
+        Ok(Some(_)) => "ключ API сохранён".to_owned(),
+        Ok(None) => "ключа API нет (jarvis --set-api-key)".to_owned(),
+        Err(e) => format!("хранилище ключей: {}", error_chain(e)),
+    };
+    let llm = &config.llm;
+    match (llm.enabled, &key) {
+        (false, _) => Item::new(
+            Status::Skip,
+            TITLE,
+            format!("выключена ([llm] enabled = false); {key_text}"),
+        ),
+        (true, Ok(Some(_))) => Item::new(
+            Status::Ok,
+            TITLE,
+            format!("{}, усилие {}; {key_text}", llm.model, llm.effort),
+        ),
+        (true, _) => Item::new(Status::Warn, TITLE, format!("включена, но {key_text}")),
+    }
 }
 
 fn check_permissions(root: &Path) -> Item {

@@ -79,6 +79,8 @@ pub enum Event {
     NotUnderstood,
     /// Команда узнана, но число в ней вне допустимого диапазона.
     InvalidValue,
+    /// Фраза — вопрос нейросети: ядро отправило его, ответ звучит как действие.
+    Question,
     /// «Режим диалога» — ядро уже включило `Timings::dialog`.
     DialogStart,
     /// «Выйди из режима диалога».
@@ -122,10 +124,14 @@ pub enum Reply {
     NotHeard,
     /// «Такое значение недопустимо, сэр» — число вне диапазона команды.
     OutOfRange,
+    /// «Секунду, сэр» — нейросеть думает дольше обычного.
+    Thinking,
+    /// «Нет связи с сервером, сэр» — нейросеть недоступна.
+    Offline,
 }
 
 impl Reply {
-    pub const ALL: [Reply; 8] = [
+    pub const ALL: [Reply; 10] = [
         Reply::Wake,
         Reply::Done,
         Reply::NotUnderstood,
@@ -134,6 +140,8 @@ impl Reply {
         Reply::Denied,
         Reply::NotHeard,
         Reply::OutOfRange,
+        Reply::Thinking,
+        Reply::Offline,
     ];
 
     /// Ключ в `pack.toml` звукового пакета и в `reply` манифеста команды.
@@ -147,6 +155,8 @@ impl Reply {
             Reply::Denied => "denied",
             Reply::NotHeard => "not_heard",
             Reply::OutOfRange => "out_of_range",
+            Reply::Thinking => "thinking",
+            Reply::Offline => "offline",
         }
     }
 
@@ -155,6 +165,7 @@ impl Reply {
     pub fn fallback(self) -> Option<Reply> {
         match self {
             Reply::OutOfRange => Some(Reply::NotUnderstood),
+            Reply::Offline => Some(Reply::Failed),
             _ => None,
         }
     }
@@ -398,6 +409,13 @@ pub fn transition(state: State, event: Event, now: Instant, timings: Timings) ->
         // (непонятно — «Не понял, сэр», тишина — «Не расслышал, сэр») ---
         (S::Executing, E::Asked) => Transition::to(listening(false), Vec::new()),
         (_, E::Asked) => Transition::stay(state),
+
+        // --- вопрос нейросети: ответ звучит как действие, по его концу —
+        // FOLLOW_UP (или диалог), как после команды ---
+        (S::Listening { .. } | S::FollowUp { .. } | S::Conversation { .. }, E::Question) => {
+            Transition::to(S::Executing, Vec::new())
+        }
+        (_, E::Question) => Transition::stay(state),
 
         // --- окончание команды ---
         (S::Executing, E::ActionFinished { reply }) => Transition::to(
@@ -986,11 +1004,51 @@ mod tests {
     }
 
     #[test]
-    fn only_out_of_range_has_a_fallback() {
+    fn new_replies_fall_back_to_old_ones() {
         for reply in Reply::ALL {
-            let expected = (reply == Reply::OutOfRange).then_some(Reply::NotUnderstood);
+            let expected = match reply {
+                Reply::OutOfRange => Some(Reply::NotUnderstood),
+                Reply::Offline => Some(Reply::Failed),
+                _ => None,
+            };
             assert_eq!(reply.fallback(), expected, "{reply:?}");
         }
+    }
+
+    #[test]
+    fn question_is_answered_like_an_action() {
+        let t0 = now();
+        for state in [
+            State::Listening {
+                until: t0,
+                retry: false,
+            },
+            State::FollowUp { until: t0 },
+            State::Conversation { until: t0 },
+        ] {
+            let tr = transition(state, Event::Question, t0, T);
+            assert_eq!(tr.next, State::Executing, "{state:?}");
+            assert!(tr.effects.is_empty());
+        }
+        for state in [State::Idle, State::Executing, State::Paused, asking(t0)] {
+            assert_eq!(
+                transition(state, Event::Question, t0, T),
+                Transition::stay(state)
+            );
+        }
+        // Ответ прозвучал — ждём продолжения без «Джарвис».
+        let done = transition(
+            State::Executing,
+            Event::ActionFinished { reply: None },
+            t0,
+            T,
+        );
+        assert_eq!(
+            done.next,
+            State::FollowUp {
+                until: t0 + T.follow_up
+            }
+        );
     }
 
     #[test]

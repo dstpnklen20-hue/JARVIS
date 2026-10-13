@@ -18,12 +18,15 @@ path = "src/main.rs"
 jarvis-actions.workspace = true
 jarvis-audio.workspace = true
 jarvis-core.workspace = true
+jarvis-llm.workspace = true
 jarvis-nlu.workspace = true
 jarvis-platform.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
+rpassword.workspace = true
 cpal.workspace = true
+serde_json.workspace = true
 sherpa-onnx.workspace = true
 tray-icon.workspace = true
 tracing.workspace = true

@@ -1,5 +1,6 @@
 //! `jarvis` — демон голосового ассистента.
 
+mod ask;
 mod bench;
 mod check;
 mod core;
@@ -22,7 +23,7 @@ use jarvis_core::{Config, logging, root};
     name = "jarvis",
     version,
     about = "Джарвис — голосовой ассистент для ПК",
-    group(ArgGroup::new("mode").args(["check", "stop", "bench", "enroll", "voice_test", "enroll_from", "record", "say"]))
+    group(ArgGroup::new("mode").args(["check", "stop", "bench", "enroll", "voice_test", "enroll_from", "record", "say", "set_api_key", "forget_api_key", "ask"]))
 )]
 struct Cli {
     /// Проверить окружение, конфиг и модели, напечатать отчёт и выйти.
@@ -32,6 +33,20 @@ struct Cli {
     /// Мягко остановить работающего Джарвиса.
     #[arg(long)]
     stop: bool,
+
+    /// Сохранить ключ API Anthropic для нейросети (ввод скрыт; ключ — в
+    /// Диспетчере учётных данных Windows, не в файлах).
+    #[arg(long)]
+    set_api_key: bool,
+
+    /// Удалить сохранённый ключ API.
+    #[arg(long)]
+    forget_api_key: bool,
+
+    /// Спросить нейросеть текстом и услышать ответ (проверка без микрофона;
+    /// нужен ключ API). Команды, которые она попросит, только называются.
+    #[arg(long, value_name = "TEXT")]
+    ask: Option<String>,
 
     /// Замеры слуха на WAV-файлах (по умолчанию — tests/fixtures).
     #[arg(long, value_name = "WAV", num_args = 0..)]
@@ -90,6 +105,25 @@ fn main() -> ExitCode {
     if cli.check {
         return check::run(cli.root.as_deref());
     }
+    if cli.set_api_key {
+        return set_api_key();
+    }
+    if cli.forget_api_key {
+        return match jarvis_llm::secrets::forget_api_key() {
+            Ok(true) => {
+                println!("Ключ API удалён.");
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                println!("Ключ API не был сохранён.");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Ошибка: {}", jarvis_core::error_chain(&e));
+                ExitCode::FAILURE
+            }
+        };
+    }
     if cli.stop {
         return match jarvis_platform::send_stop_signal(daemon::INSTANCE_NAME) {
             Ok(true) => {
@@ -139,6 +173,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     if let Some(path) = &cli.record {
         return record::run(&config, path, cli.seconds);
     }
+    if let Some(question) = &cli.ask {
+        return ask::run(&root, &config, question);
+    }
     if let Some(text) = &cli.say {
         return say::run(
             &root,
@@ -180,5 +217,36 @@ fn warn_if_elevated() {
         ),
         Ok(false) => {}
         Err(e) => tracing::debug!(error = %e, "не удалось проверить права администратора"),
+    }
+}
+
+/// `jarvis --set-api-key`: ключ вводится скрыто и сохраняется в хранилище ОС.
+fn set_api_key() -> ExitCode {
+    println!("Ключ API Anthropic: console.anthropic.com → API Keys. Вставьте его и нажмите Enter");
+    println!("(ввод не отображается; ключ сохранится в Диспетчере учётных данных Windows).");
+    let key = match rpassword::prompt_password("Ключ: ") {
+        Ok(key) => key.trim().to_owned(),
+        Err(e) => {
+            eprintln!("Не удалось прочитать ключ: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !jarvis_llm::secrets::looks_like_key(&key) {
+        eprintln!(
+            "Это не похоже на ключ Anthropic (должен начинаться с sk-ant-). Ничего не сохранено."
+        );
+        return ExitCode::FAILURE;
+    }
+    match jarvis_llm::secrets::save_api_key(&key) {
+        Ok(()) => {
+            println!(
+                "Ключ сохранён. Включите нейросеть: [llm] enabled = true в config\\user.toml."
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Ошибка: {}", jarvis_core::error_chain(&e));
+            ExitCode::FAILURE
+        }
     }
 }
