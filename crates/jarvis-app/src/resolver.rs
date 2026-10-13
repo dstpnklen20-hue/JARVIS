@@ -105,11 +105,20 @@ const BUILTINS: &[(&str, &[&str])] = &[
         BUILTIN_DIALOG_OFF,
         &[
             "выйди из режима диалога",
+            "выключи режим диалога",
+            "отключи режим диалога",
             "закончим диалог",
             "конец диалога",
         ],
     ),
 ];
+
+/// «Включи» и «выключи режим диалога» различаются двумя буквами — их
+/// путаница не переспрашивается, а решается по состоянию (см. core).
+pub fn is_dialog_pair(first: &str, second: &str) -> bool {
+    let dialog = |id: &str| id == BUILTIN_DIALOG_ON || id == BUILTIN_DIALOG_OFF;
+    dialog(first) && dialog(second)
+}
 
 pub fn is_builtin(id: &str) -> bool {
     id.starts_with("builtin:")
@@ -515,9 +524,30 @@ mod tests {
         assert_eq!(id("хватит"), BUILTIN_STOP);
         assert_eq!(id("забудь разрешения"), BUILTIN_FORGET_PERMISSIONS);
         assert_eq!(id("джарвис режим диалога"), BUILTIN_DIALOG_ON);
-        assert_eq!(id("включи режим диалога"), BUILTIN_DIALOG_ON);
         assert_eq!(id("выйди из режима диалога"), BUILTIN_DIALOG_OFF);
         assert_eq!(id("закончим диалог"), BUILTIN_DIALOG_OFF);
+        // «Включи» / «выключи режим диалога» отличаются двумя буквами: либо
+        // точная команда, либо пара «вкл/выкл», которую ядро решает по
+        // состоянию (в диалоге — выход, иначе — вход), но не чужая команда.
+        for text in [
+            "включи режим диалога",
+            "выключи режим диалога",
+            "отключи режим диалога",
+        ] {
+            match resolver().resolve(text) {
+                Resolution::Command { id, .. } => {
+                    assert!(is_dialog_pair(&id, &id), "«{text}»: {id}")
+                }
+                Resolution::Ambiguous { first, second } => {
+                    assert!(
+                        is_dialog_pair(&first, &second),
+                        "«{text}»: {first} / {second}"
+                    )
+                }
+                other => panic!("«{text}»: {other:?}"),
+            }
+        }
+        assert!(!is_dialog_pair(BUILTIN_DIALOG_ON, BUILTIN_STOP));
         assert!(is_builtin(BUILTIN_STOP));
         assert!(!is_builtin("open_youtube"));
     }

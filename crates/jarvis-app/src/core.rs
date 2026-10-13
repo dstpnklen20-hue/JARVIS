@@ -17,7 +17,7 @@ use jarvis_app::brain::{Brain, BrainEvent, Failure, ModelFactory, slot_values, t
 use jarvis_app::resolver::{
     BUILTIN_DIALOG_OFF, BUILTIN_DIALOG_ON, BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS,
     BUILTIN_STOP, CommandResolver, EXACT_SCORE, EarlyDecider, Resolution, hotword_phrases,
-    is_builtin, spoken_phrase,
+    is_builtin, is_dialog_pair, spoken_phrase,
 };
 use jarvis_app::speech::{self, Speech, SpeechEvent};
 use jarvis_app::system::PlatformSystem;
@@ -676,6 +676,17 @@ impl Core {
         tracing::info!(text = %t.text, ?resolution, "фраза");
         match resolution {
             Resolution::Command { id, score, slots } => self.command(id, t.text, score, slots, now),
+            Resolution::Ambiguous { first, second } if is_dialog_pair(&first, &second) => {
+                // «Включи / выключи режим диалога» — решает состояние, не вопрос.
+                tracing::info!("режим диалога: включи или выключи — решаю по состоянию");
+                self.command(
+                    BUILTIN_DIALOG_ON.to_owned(),
+                    t.text,
+                    1.0,
+                    SlotValues::new(),
+                    now,
+                );
+            }
             Resolution::Ambiguous { first, second } => {
                 tracing::info!(%first, %second, "неоднозначно — переспрашиваю");
                 // Уточняющий вопрос — только после «Джарвис»: в FOLLOW_UP
@@ -734,8 +745,10 @@ impl Core {
             return;
         }
         if id == BUILTIN_DIALOG_ON || id == BUILTIN_DIALOG_OFF {
-            // Безвредные встроенные — без вопроса.
-            let on = id == BUILTIN_DIALOG_ON;
+            // Безвредные встроенные — без вопроса. В режиме диалога любая из
+            // фраз — выход: включать включённое незачем, а «включи» и
+            // «выключи» распознаватель путает (две буквы разницы).
+            let on = id == BUILTIN_DIALOG_ON && self.timings.dialog.is_none();
             tracing::info!(on, "режим диалога");
             self.timings.dialog = on
                 .then(|| Duration::from_secs(u64::from(self.config.session.dialog_idle_mins) * 60));

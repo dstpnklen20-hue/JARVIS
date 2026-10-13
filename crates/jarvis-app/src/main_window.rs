@@ -64,6 +64,8 @@ pub enum PageMsg {
     PickProgram,
     /// Открыт журнал действий.
     Journal,
+    /// Щелчок по реактору: пауза / продолжить.
+    TogglePause,
 }
 
 impl PageMsg {
@@ -81,6 +83,7 @@ impl PageMsg {
             PageMsg::DeleteCommand { .. } => "delete_command",
             PageMsg::PickProgram => "pick_program",
             PageMsg::Journal => "journal",
+            PageMsg::TogglePause => "toggle_pause",
         }
     }
 }

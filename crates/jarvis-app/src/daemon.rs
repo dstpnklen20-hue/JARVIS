@@ -277,6 +277,9 @@ pub fn run(root: &Path, config: Config, restart: bool) -> anyhow::Result<()> {
                         w.update(&reply);
                     }
                     PageMsg::Journal => w.update(&crate::main_window::journal_json(&journal_dir)),
+                    PageMsg::TogglePause => {
+                        let _ = core_tx.send(CoreMsg::TogglePause);
+                    }
                     PageMsg::PickProgram => {
                         if let Some(path) = w.pick_program() {
                             w.update(&json!({ "picked": path.display().to_string() }));

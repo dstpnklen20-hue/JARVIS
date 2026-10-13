@@ -867,7 +867,24 @@ fn process_name(name: &str) -> Result<(), String> {
 
 /// Подходит ли заголовок вкладки к шаблону: `*` — любые символы, регистр
 /// не важен, остальное — буквально и целиком («* - YouTube», «Google Календарь*»).
+/// Счётчик уведомлений в начале заголовка («(98) YouTube», «(99+) Входящие»)
+/// не мешает: сайты ставят его сами, и шаблон с ним и без него подходит.
 pub fn title_matches(pattern: &str, title: &str) -> bool {
+    glob(pattern, title) || without_counter(title).is_some_and(|rest| glob(pattern, rest))
+}
+
+/// Заголовок без счётчика «(N) » / «(N+) » в начале.
+fn without_counter(title: &str) -> Option<&str> {
+    let rest = title.trim_start().strip_prefix('(')?;
+    let close = rest.find(')')?;
+    let count = rest[..close].strip_suffix('+').unwrap_or(&rest[..close]);
+    if count.is_empty() || !count.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(rest[close + 1..].trim_start())
+}
+
+fn glob(pattern: &str, title: &str) -> bool {
     let pattern: Vec<char> = pattern.trim().to_lowercase().chars().collect();
     let title: Vec<char> = title.trim().to_lowercase().chars().collect();
     // Классический жадный разбор со звёздочкой и возвратом.
@@ -1457,6 +1474,11 @@ operation = "next"
     fn tab_title_patterns() {
         assert!(title_matches("* - YouTube", "(96) МЕНТАЛИСТ - YouTube"));
         assert!(title_matches("youtube", "YouTube"));
+        // Счётчик уведомлений в начале заголовка не мешает.
+        assert!(title_matches("YouTube", "(98) YouTube"));
+        assert!(title_matches("Входящие*", "(99+) Входящие - Gmail"));
+        assert!(!title_matches("YouTube", "(98) YouTube Music"));
+        assert!(!title_matches("YouTube", "(лекция) YouTube"));
         assert!(!title_matches("* - YouTube", "YouTube Music"));
         assert!(!title_matches("YouTube", "YouTube Music"));
         assert!(title_matches(
