@@ -1,0 +1,688 @@
+<!doctype html>
+<!--
+  Главное окно Джарвиса. Вшивается в jarvis.exe и показывается в WebView2.
+  Открытая в обычном браузере (нет window.ipc) — работает как макет: примерные
+  данные и панель переключения состояний внизу.
+  Данные из ядра выводятся только через textContent — никакого HTML из манифестов.
+-->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>Джарвис</title>
+<style>
+  :root {
+    --bg: #05090e;
+    --panel: #0b131b;
+    --panel-2: #101b26;
+    --line: #182532;
+    --text: #d6e4ee;
+    --muted: #6c7f90;
+    --dim: #3e4f5f;
+    --c: #1E8CF0;               /* цвет состояния */
+    --level: 0;                 /* громкость 0..1: голос или ответ */
+    --font: "Bahnschrift", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 var(--font);
+    user-select: none;
+    overflow: hidden;
+  }
+  button, input, select { font: inherit; color: inherit; }
+
+  /* ---------- окно ---------- */
+  .app {
+    position: relative;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background:
+      radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--c) 14%, transparent) 0, transparent 55%),
+      var(--bg);
+    transition: background .6s;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 22px;
+    background: linear-gradient(#0a1118, #070c12);
+    border-bottom: 1px solid var(--line);
+  }
+  .logo { flex: none; width: 42px; height: 42px; cursor: pointer; filter: drop-shadow(0 0 6px color-mix(in srgb, var(--c) 60%, transparent)); }
+  .brand { line-height: 1.1; cursor: pointer; white-space: nowrap; }
+  .brand b {
+    display: block;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    font-stretch: condensed;
+  }
+  .brand small { color: var(--muted); font-size: 12px; letter-spacing: .05em; }
+  .brand small em { color: var(--c); font-style: normal; transition: color .6s; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  nav button svg { width: 18px; height: 18px; }
+  nav button:hover { color: var(--text); background: var(--panel); }
+  nav button.active { color: var(--text); box-shadow: inset 0 -2px 0 var(--c); border-radius: 6px 6px 0 0; }
+
+  main { flex: 1; min-height: 0; position: relative; }
+  .page { position: absolute; inset: 0; overflow-y: auto; padding: 18px 22px; display: none; }
+  .page.active { display: block; }
+  .page::-webkit-scrollbar { width: 8px; }
+  .page::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+
+  /* ---------- главная: реактор ---------- */
+  #home.active { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .reactor { width: min(330px, 78vw); aspect-ratio: 1; position: relative; }
+  .reactor svg { width: 100%; height: 100%; overflow: visible; }
+  .halo {
+    position: absolute;
+    inset: 12%;
+    border-radius: 50%;
+    background: radial-gradient(circle, color-mix(in srgb, var(--c) 55%, transparent) 0, transparent 68%);
+    filter: blur(18px);
+    opacity: calc(.45 + var(--level) * .55);
+    transform: scale(calc(1 + var(--level) * .18));
+    transition: background .6s;
+  }
+  .r-light { stroke: color-mix(in srgb, var(--c) 72%, white); transition: stroke .6s; }
+  .r-fill { fill: color-mix(in srgb, var(--c) 72%, white); transition: fill .6s; }
+  .r-dim { stroke: color-mix(in srgb, var(--c) 55%, transparent); transition: stroke .6s; }
+  .r-dark { fill: #08121c; stroke: color-mix(in srgb, var(--c) 30%, #08121c); stroke-width: .8; }
+  .r-gap { stroke: #06101a; }
+  .core { transform-origin: 0 0; transform: scale(calc(1 + var(--level) * .12)); }
+  .spin { transform-origin: 0 0; animation: spin 60s linear infinite; }
+  .spin-back { transform-origin: 0 0; animation: spin 90s linear infinite reverse; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .breathe { animation: breathe 4s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: .72; } }
+
+  body.s-listening .spin { animation-duration: 14s; }
+  body.s-listening .spin-back { animation-duration: 20s; }
+  body.s-starting .spin { animation-duration: 3s; }
+  body.s-starting .spin-back { animation-duration: 5s; }
+  body.s-paused .spin, body.s-paused .spin-back, body.s-paused .breathe { animation-play-state: paused; }
+  body.s-paused .reactor { opacity: .55; }
+  body.s-problem .breathe { animation: blink 1.6s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .35; } }
+
+  .state {
+    margin-top: 18px;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: color-mix(in srgb, var(--c) 60%, white);
+    transition: color .6s;
+    text-align: center;
+  }
+  .heard { margin-top: 6px; min-height: 20px; color: var(--muted); text-align: center; max-width: 100%;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---------- нижняя панель ---------- */
+  footer {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    padding: 14px 22px 16px;
+    border-top: 1px solid var(--line);
+    background: #060b10;
+  }
+  .stat { display: flex; gap: 10px; min-width: 0; }
+  .dot {
+    flex: none;
+    width: 10px; height: 10px;
+    margin-top: 5px;
+    border-radius: 50%;
+    background: var(--dot);
+    box-shadow: 0 0 10px var(--dot), 0 0 2px var(--dot);
+  }
+  .stat b { display: block; font-size: 15px; color: var(--dot); letter-spacing: .02em; }
+  .stat span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+               font-size: 12px; line-height: 1.3; color: var(--muted); overflow: hidden;
+               overflow-wrap: anywhere; }
+  .stat div { min-width: 0; }
+  .ok { --dot: #3ccf6e; }
+  .warn { --dot: #f0a030; }
+  .bad { --dot: #ef5350; }
+  .info { --dot: #3d8bfd; }
+
+  /* ---------- команды ---------- */
+  .toolbar { display: flex; gap: 8px; margin-bottom: 14px; }
+  .search {
+    flex: 1;
+    padding: 9px 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    outline: none;
+  }
+  .search:focus { border-color: color-mix(in srgb, var(--c) 60%, var(--line)); }
+  .pack { margin: 16px 0 6px; color: var(--muted); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
+  .cmd {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 12px;
+    padding: 11px 13px;
+    margin-bottom: 6px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .cmd .phrase { font-weight: 600; font-size: 15px; }
+  .cmd .more { color: var(--muted); font-size: 12px; }
+  .cmd .action { grid-column: 1 / -1; color: #9fb3c3; font-size: 13px; overflow-wrap: anywhere; }
+  .perm {
+    align-self: start;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .perm.always { color: #3ccf6e; border-color: #1f4d30; }
+  .perm.never { color: #ef5350; border-color: #5a2424; }
+  .perm.ask { color: var(--muted); }
+  .perm.locked { cursor: default; color: #f0a030; border-color: #5a4220; }
+  .empty { color: var(--muted); text-align: center; margin-top: 40px; }
+
+  /* ---------- настройки ---------- */
+  .group { margin-bottom: 18px; }
+  .group h3 { margin: 0 0 8px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 13px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-bottom-width: 0;
+  }
+  .row:first-of-type { border-radius: 8px 8px 0 0; }
+  .row:last-child { border-bottom-width: 1px; border-radius: 0 0 8px 8px; }
+  .row:only-of-type { border-radius: 8px; }
+  .row label { flex: 1; min-width: 0; }
+  .row label small { display: block; color: var(--muted); font-size: 12px; }
+  .tag { margin-left: 6px; padding: 1px 6px; border-radius: 4px; background: #2a2414; color: #f0a030; font-size: 11px; }
+  select, .field {
+    max-width: 55%;
+    padding: 6px 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    outline: none;
+  }
+  .field { width: 210px; }
+  input[type=range] { width: 150px; accent-color: var(--c); }
+  .val { width: 38px; text-align: right; color: var(--muted); }
+  .switch { position: relative; width: 40px; height: 22px; flex: none; }
+  .switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; z-index: 1; }
+  .switch i {
+    position: absolute; inset: 0; border-radius: 11px; background: #22303d; transition: background .2s;
+  }
+  .switch i::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+    background: #9fb3c3; transition: transform .2s, background .2s;
+  }
+  .switch input:checked + i { background: color-mix(in srgb, var(--c) 70%, #000); }
+  .switch input:checked + i::after { transform: translateX(18px); background: white; }
+  .btn {
+    padding: 7px 14px;
+    border: 1px solid color-mix(in srgb, var(--c) 50%, var(--line));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--c) 18%, var(--panel-2));
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn:hover { background: color-mix(in srgb, var(--c) 30%, var(--panel-2)); }
+  .savebar { display: flex; align-items: center; gap: 12px; justify-content: flex-end; margin: 6px 0 4px; }
+  .savebar span { color: var(--muted); font-size: 12px; margin-right: auto; }
+
+  body.no-anim * { transition: none !important; }
+
+  /* ---------- макет в браузере ---------- */
+  body.mock { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+              background: #111; overflow: auto; padding: 20px 0; height: auto; min-height: 100%; }
+  body.mock .app { width: 470px; height: 660px; flex: none; border: 1px solid #2a2a2a;
+                   box-shadow: 0 20px 60px #000; }
+  .demo { display: none; flex-wrap: wrap; gap: 6px; justify-content: center; max-width: 470px; }
+  body.mock .demo { display: flex; }
+  .demo button { padding: 5px 9px; border: 1px solid #333; border-radius: 6px; background: #1b1b1b; color: #ccc;
+                 font-size: 12px; cursor: pointer; }
+  .demo button.on { border-color: #888; color: white; }
+  .demo p { width: 100%; margin: 0; text-align: center; color: #777; font-size: 12px; }
+</style>
+</head>
+<body class="s-starting">
+<div class="app">
+  <header>
+    <svg class="logo" viewBox="-100 -100 200 200" data-tab="home" aria-hidden="true">
+      <circle r="62" fill="none" stroke-width="30" class="r-light"/>
+      <g class="logo-seg"></g>
+      <circle r="38" fill="none" stroke-width="12" class="r-gap"/>
+      <circle r="26" class="r-fill"/>
+    </svg>
+    <div class="brand" data-tab="home">
+      <b>JARVIS</b>
+      <small><span id="version">v0.1.0</span> · <em id="brand-state">загрузка</em></small>
+    </div>
+    <nav>
+      <button data-tab="commands" title="Команды">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        Команды
+      </button>
+      <button data-tab="settings" title="Настройки">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        Настройки
+      </button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Главная -->
+    <section class="page active" id="home">
+      <div class="reactor">
+        <div class="halo"></div>
+        <svg viewBox="-100 -100 200 200" aria-hidden="true">
+          <defs>
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="3.2" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+            <radialGradient id="core-grad">
+              <stop offset="0" stop-color="white"/>
+              <stop offset=".55" stop-color="white" stop-opacity=".92"/>
+              <stop offset="1" class="core-edge" stop-color="#7FD8FF"/>
+            </radialGradient>
+          </defs>
+          <!-- внешние дуги и риски -->
+          <g class="spin-back">
+            <circle r="97" fill="none" stroke-width="1.6" class="r-dim"
+                    stroke-dasharray="70 32 18 32 110 40 60 248" opacity=".7"/>
+          </g>
+          <g class="spin">
+            <circle r="87" fill="none" stroke-width="5" class="r-dim"
+                    stroke-dasharray="2.2 6.91" />
+          </g>
+          <!-- светящееся кольцо с сегментами -->
+          <g filter="url(#glow)" class="breathe">
+            <circle r="62" fill="none" stroke-width="24" class="r-light"/>
+          </g>
+          <g id="segments"></g>
+          <circle r="47" fill="none" stroke-width="5" class="r-gap"/>
+          <!-- внутреннее кольцо и ядро -->
+          <g filter="url(#glow)" class="breathe">
+            <circle r="39" fill="none" stroke-width="7" class="r-light"/>
+          </g>
+          <circle r="33" fill="none" stroke-width="3" class="r-gap"/>
+          <g class="core" filter="url(#glow)">
+            <circle r="29" fill="url(#core-grad)"/>
+          </g>
+          <circle r="13" fill="none" stroke-width="1.2" stroke="#ffffff" opacity=".5"/>
+        </svg>
+      </div>
+      <div class="state" id="state">Загружаюсь…</div>
+      <div class="heard" id="heard"></div>
+    </section>
+
+    <!-- Команды -->
+    <section class="page" id="commands">
+      <div class="toolbar">
+        <input class="search" id="search" placeholder="Поиск: фраза или действие" autocomplete="off">
+      </div>
+      <div id="cmd-list"></div>
+    </section>
+
+    <!-- Настройки -->
+    <section class="page" id="settings">
+      <div class="group">
+        <h3>Слух</h3>
+        <div class="row">
+          <label>Микрофон <span class="tag">перезапуск</span></label>
+          <select id="set-mic"></select>
+        </div>
+      </div>
+      <div class="group">
+        <h3>Голос</h3>
+        <div class="row">
+          <label>Звуковой пакет<small>готовые фразы ответов</small></label>
+          <select id="set-pack"></select>
+        </div>
+        <div class="row">
+          <label>Голос синтеза<small>ответы нейросети и подробности</small></label>
+          <select id="set-tts"></select>
+        </div>
+        <div class="row">
+          <label>Громкость ответов</label>
+          <input type="range" id="set-volume" min="0" max="200" step="5">
+          <span class="val" id="set-volume-val"></span>
+        </div>
+      </div>
+      <div class="group">
+        <h3>Нейросеть Claude</h3>
+        <div class="row">
+          <label>Свободные вопросы<small>«Джарвис, расскажи про…»</small></label>
+          <span class="switch"><input type="checkbox" id="set-llm"><i></i></span>
+        </div>
+        <div class="row">
+          <label>Ключ API<small id="key-status"></small></label>
+          <input class="field" type="password" id="set-key" placeholder="sk-ant-…" autocomplete="off">
+          <button class="btn" id="save-key">Сохранить</button>
+        </div>
+        <div class="row">
+          <label>Показывать ответ в окне</label>
+          <span class="switch"><input type="checkbox" id="set-window"><i></i></span>
+        </div>
+      </div>
+      <div class="group">
+        <h3>Система</h3>
+        <div class="row">
+          <label>Запускать при входе в Windows</label>
+          <span class="switch"><input type="checkbox" id="set-autostart"><i></i></span>
+        </div>
+      </div>
+      <div class="savebar">
+        <span id="save-note">Изменения сохраняются в config\user.toml</span>
+        <button class="btn" id="restart" hidden>Перезапустить</button>
+        <button class="btn" id="save">Сохранить</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="stat" id="st-mic"><i class="dot"></i><div><b>Микрофон</b><span></span></div></div>
+    <div class="stat" id="st-ai"><i class="dot"></i><div><b>Нейросети</b><span></span></div></div>
+    <div class="stat" id="st-res"><i class="dot"></i><div><b>Ресурсы</b><span></span></div></div>
+  </footer>
+</div>
+
+<div class="demo" id="demo">
+  <p>Макет: переключите состояние, чтобы увидеть реактор</p>
+  <button data-state="starting">Загрузка</button>
+  <button data-state="idle">Жду</button>
+  <button data-state="listening">Слушаю</button>
+  <button data-state="asking">Вопрос</button>
+  <button data-state="paused">Пауза</button>
+  <button data-state="problem">Проблема</button>
+  <button id="demo-speak">Говорит ▶</button>
+</div>
+
+<script>
+"use strict";
+
+// Цвета — те же, что у значка в трее (tray.rs).
+const STATES = {
+  starting:  { c: "#E0A020", label: "Загружаюсь…",          short: "загрузка" },
+  idle:      { c: "#1E8CF0", label: "Жду «Джарвис»",        short: "в работе" },
+  listening: { c: "#7FF4FF", label: "Слушаю, сэр",          short: "слушаю" },
+  asking:    { c: "#9B51E0", label: "Жду вашего решения",   short: "вопрос" },
+  paused:    { c: "#8A8F98", label: "На паузе",             short: "пауза" },
+  problem:   { c: "#E03E3E", label: "Не слышу",             short: "проблема" },
+};
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+};
+
+// ---------- реактор: сегменты ----------
+const SVG = "http://www.w3.org/2000/svg";
+function segments(group, count, r, w, h) {
+  for (let i = 0; i < count; i++) {
+    const rect = document.createElementNS(SVG, "rect");
+    rect.setAttribute("x", -w / 2);
+    rect.setAttribute("y", -r - h / 2);
+    rect.setAttribute("width", w);
+    rect.setAttribute("height", h);
+    rect.setAttribute("rx", 2);
+    rect.setAttribute("class", "r-dark");
+    rect.setAttribute("transform", `rotate(${(360 / count) * i})`);
+    group.appendChild(rect);
+  }
+}
+segments($("segments"), 10, 63, 17, 17);
+segments(document.querySelector(".logo-seg"), 10, 64, 20, 20);
+
+// ---------- вкладки ----------
+function showTab(name) {
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === name));
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  // Свежий список — разрешения могли смениться голосом.
+  if (name === "commands") send({ type: "commands" });
+}
+document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+// ---------- связь с ядром ----------
+const native = window.ipc && typeof window.ipc.postMessage === "function";
+function send(msg) {
+  if (native) window.ipc.postMessage(JSON.stringify(msg));
+  else console.log("→ ядро", msg);
+}
+
+// Ядро вызывает window.jarvis.update({...}) — любые поля по отдельности.
+let commands = [];
+const jarvis = {
+  update(data) {
+    if (data.state) setState(data.state, data.problem);
+    if ("level" in data) setLevel(data.level);
+    if ("heard" in data) $("heard").textContent = data.heard ? `«${data.heard}»` : "";
+    if (data.version) $("version").textContent = data.version;
+    if (data.status) setStatus(data.status);
+    if (data.commands) { commands = data.commands; renderCommands(); }
+    if (data.settings) fillSettings(data.settings);
+    if (data.note) $("save-note").textContent = data.note;
+    if ("restart" in data) $("restart").hidden = !data.restart;
+    if (data.tab) showTab(data.tab);
+  },
+};
+window.jarvis = jarvis;
+
+function setState(name, problem) {
+  const s = STATES[name] || STATES.idle;
+  document.body.className = document.body.className.replace(/\bs-\w+/g, "").trim() + " s-" + name;
+  document.documentElement.style.setProperty("--c", s.c);
+  document.querySelector(".core-edge").setAttribute("stop-color", s.c);
+  $("state").textContent = name === "problem" && problem ? `Не слышу: ${problem}` : s.label;
+  $("brand-state").textContent = s.short;
+}
+
+// Плавное сглаживание громкости: быстро вверх, медленно вниз.
+let level = 0, target = 0;
+function setLevel(v) { target = Math.max(0, Math.min(1, Number(v) || 0)); }
+(function tick() {
+  level += (target - level) * (target > level ? 0.5 : 0.12);
+  document.documentElement.style.setProperty("--level", level.toFixed(3));
+  requestAnimationFrame(tick);
+})();
+
+function setStatus(st) {
+  for (const [id, item] of [["st-mic", st.mic], ["st-ai", st.ai], ["st-res", st.res]]) {
+    if (!item) continue;
+    const box = $(id);
+    box.className = "stat " + (item.level || "info");
+    box.querySelector("span").textContent = item.text;
+    box.querySelector("span").title = item.text;
+  }
+}
+
+// ---------- команды ----------
+const PERM = {
+  ask:    { text: "Спрашивать", next: "always" },
+  always: { text: "Всегда",     next: "never" },
+  never:  { text: "Никогда",    next: "ask" },
+};
+function renderCommands() {
+  const q = $("search").value.trim().toLowerCase();
+  const list = $("cmd-list");
+  list.replaceChildren();
+  let pack = null, shown = 0;
+  for (const c of commands) {
+    const hay = (c.phrases.join(" ") + " " + c.action + " " + c.pack).toLowerCase();
+    if (q && !hay.includes(q)) continue;
+    if (c.pack !== pack) { pack = c.pack; list.appendChild(el("div", "pack", pack)); }
+    const card = el("div", "cmd");
+    const head = el("div");
+    head.appendChild(el("div", "phrase", c.phrases[0]));
+    if (c.phrases.length > 1) head.appendChild(el("div", "more", c.phrases.slice(1).join(" · ")));
+    card.appendChild(head);
+    let perm;
+    if (c.always_ask) {
+      perm = el("span", "perm locked", "Каждый раз");
+      perm.title = "Команда всегда спрашивает разрешение (always_ask в манифесте)";
+    } else {
+      const p = PERM[c.permission] || PERM.ask;
+      perm = el("button", "perm " + (c.permission || "ask"), p.text);
+      perm.title = "Нажмите, чтобы сменить: спрашивать → всегда → никогда";
+      perm.addEventListener("click", () => {
+        c.permission = p.next;
+        send({ type: "permission", id: c.id, value: p.next });
+        renderCommands();
+      });
+    }
+    card.appendChild(perm);
+    card.appendChild(el("div", "action", c.action));
+    list.appendChild(card);
+    shown++;
+  }
+  if (!shown) list.appendChild(el("div", "empty", q ? "Ничего не нашлось" : "Команд нет"));
+}
+$("search").addEventListener("input", renderCommands);
+
+// ---------- настройки ----------
+function options(select, items, value) {
+  select.replaceChildren(...items.map((it) => {
+    const o = el("option", null, it.label);
+    o.value = it.value;
+    o.selected = it.value === value;
+    return o;
+  }));
+}
+function fillSettings(s) {
+  options($("set-mic"), s.mics, s.mic);
+  options($("set-pack"), s.packs, s.pack);
+  options($("set-tts"), s.voices, s.tts);
+  $("set-volume").value = s.volume;
+  $("set-volume-val").textContent = s.volume + "%";
+  $("set-llm").checked = s.llm;
+  $("set-window").checked = s.show_window;
+  $("set-autostart").checked = s.autostart;
+  $("key-status").textContent = s.has_key ? "задан — хранится в Windows" : "не задан";
+}
+$("set-volume").addEventListener("input", (e) => { $("set-volume-val").textContent = e.target.value + "%"; });
+$("set-autostart").addEventListener("change", (e) => send({ type: "autostart", on: e.target.checked }));
+$("save").addEventListener("click", () => send({
+  type: "settings",
+  mic: $("set-mic").value,
+  pack: $("set-pack").value,
+  tts: $("set-tts").value,
+  volume: Number($("set-volume").value),
+  llm: $("set-llm").checked,
+  show_window: $("set-window").checked,
+}));
+$("restart").addEventListener("click", () => {
+  $("restart").hidden = true;
+  $("save-note").textContent = "Перезапускаюсь…";
+  send({ type: "restart" });
+});
+$("save-key").addEventListener("click", () => {
+  const key = $("set-key").value.trim();
+  if (!key) return;
+  send({ type: "api_key", key });
+  $("set-key").value = "";
+});
+
+// ---------- макет в обычном браузере ----------
+if (native) {
+  send({ type: "ready" });
+} else {
+  document.body.classList.add("mock");
+  jarvis.update({
+    version: "v0.1.0",
+    state: "starting",
+    status: {
+      mic: { level: "ok", text: "Микрофон (ME6S)" },
+      ai: { level: "warn", text: "Zipformer · Claude: нет ключа" },
+      res: { level: "info", text: "RAM 182 МБ · CPU 2%" },
+    },
+    commands: [
+      { id: "open_youtube", pack: "browser", phrases: ["открой ютуб", "запусти ютуб", "включи ютуб"], action: "Открыть https://www.youtube.com (сначала поищет открытую вкладку)", permission: "always" },
+      { id: "open_google", pack: "browser", phrases: ["открой гугл"], action: "Открыть https://www.google.com", permission: "always" },
+      { id: "open_browser", pack: "browser", phrases: ["открой браузер"], action: "Запустить firefox.exe (открыт — вывести окно вперёд)", permission: "ask" },
+      { id: "volume_set", pack: "media", phrases: ["громкость на {level}", "поставь громкость {level}"], action: "Громкость системы {level}% (0–100)", permission: "always" },
+      { id: "play_pause", pack: "media", phrases: ["пауза", "продолжи"], action: "Клавиша «Воспроизведение/пауза»", permission: "always" },
+      { id: "task_manager", pack: "system", phrases: ["открой диспетчер задач"], action: "Нажать Ctrl+Shift+Esc", permission: "ask" },
+      { id: "lock", pack: "system", phrases: ["заблокируй компьютер"], action: "Заблокировать компьютер", always_ask: true },
+      { id: "shutdown", pack: "system", phrases: ["выключи компьютер"], action: "Выключить компьютер", always_ask: true },
+      { id: "game_mode", pack: "my", phrases: ["запусти игровой режим"], action: "Steam → вопрос «Во что хотите поиграть, сэр?»", permission: "never" },
+    ],
+    settings: {
+      mics: [{ value: "", label: "По умолчанию" }, { value: "ME6S", label: "Микрофон (ME6S)" }, { value: "Realtek", label: "Микрофонный массив (Realtek)" }],
+      mic: "ME6S",
+      packs: [{ value: "jarvis", label: "Джарвис" }, { value: "default", label: "Стандартный" }],
+      pack: "jarvis",
+      voices: [{ value: "dmitri", label: "Dmitri" }, { value: "irina", label: "Irina" }],
+      tts: "dmitri",
+      volume: 80,
+      llm: false,
+      show_window: true,
+      autostart: true,
+      has_key: false,
+    },
+  });
+  // ?state=listening&tab=commands — сразу нужный вид (для снимков макета).
+  const query = new URLSearchParams(location.search);
+  if (query.get("tab")) showTab(query.get("tab"));
+  if (query.get("state")) {
+    document.documentElement.style.setProperty("--level", "0");
+    document.body.classList.add("no-anim");
+  }
+  setTimeout(() => demo(query.get("state") || "idle"), query.get("state") ? 0 : 1500);
+
+  function demo(name) {
+    jarvis.update({ state: name, problem: "микрофон отключён" });
+    document.querySelectorAll(".demo [data-state]").forEach((b) => b.classList.toggle("on", b.dataset.state === name));
+    if (name === "listening") jarvis.update({ heard: "открой ютуб" });
+  }
+  document.querySelectorAll(".demo [data-state]").forEach((b) => b.addEventListener("click", () => demo(b.dataset.state)));
+
+  // «Говорит»: громкость как у речи — слоги и паузы.
+  let speaking = null;
+  $("demo-speak").addEventListener("click", (e) => {
+    if (speaking) { clearInterval(speaking); speaking = null; setLevel(0); e.target.textContent = "Говорит ▶"; return; }
+    let t = 0;
+    speaking = setInterval(() => {
+      t += 1;
+      const syllable = Math.abs(Math.sin(t * 0.9)) * (0.55 + Math.random() * 0.45);
+      setLevel(t % 23 < 3 ? 0.05 : syllable);
+    }, 70);
+    e.target.textContent = "Говорит ■";
+  });
+}
+</script>
+</body>
+</html>

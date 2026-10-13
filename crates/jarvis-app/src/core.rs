@@ -42,7 +42,7 @@ use jarvis_nlu::answers::{PermissionReply, parse_reply};
 use jarvis_nlu::{CommandMatcher, CommandPhrases, MatchResult, Thresholds};
 use jarvis_platform::{DialogButton, DialogHandle, DialogSpec, TextWindow, Waker};
 
-use crate::tray::Indicator;
+use crate::tray::{Indicator, UiMsg};
 
 /// Как часто ядро проверяет таймауты и раннее решение.
 const CORE_TICK: Duration = Duration::from_millis(50);
@@ -83,6 +83,13 @@ pub enum CoreMsg {
     EmergencyStop,
     ForgetPermissions,
     ReloadCommands,
+    /// Главное окно просит список команд с разрешениями.
+    WindowCommands,
+    /// Главное окно: «ask» (сбросить решение), «always» или «never».
+    SetPermission {
+        id: String,
+        value: String,
+    },
     Shutdown,
 }
 
@@ -102,7 +109,7 @@ pub struct CoreParams {
     pub voice: Option<VoiceSetup>,
     /// Запущены от администратора — предупредить голосом (раздел 2.5 ТЗ).
     pub elevated: bool,
-    pub ui: Sender<Indicator>,
+    pub ui: Sender<UiMsg>,
     pub waker: Waker,
 }
 
@@ -287,7 +294,7 @@ pub struct Core {
     dialog: Option<DialogHandle>,
     /// Номер окна-вопроса: ответ из закрытого окна игнорируется.
     ask_generation: u64,
-    ui: Sender<Indicator>,
+    ui: Sender<UiMsg>,
     waker: Waker,
     /// Слух сообщил о проблеме — показываем её, пока не наладится.
     problem: Option<String>,
@@ -426,6 +433,11 @@ impl Core {
                 Ok(CoreMsg::TogglePause) => self.apply(Event::TogglePause),
                 Ok(CoreMsg::EmergencyStop) => self.emergency_stop(Stop::Hotkey),
                 Ok(CoreMsg::ForgetPermissions) => self.forget_permissions("трей"),
+                Ok(CoreMsg::WindowCommands) => self.send_window_commands(),
+                Ok(CoreMsg::SetPermission { id, value }) => {
+                    self.set_permission(&id, &value);
+                    self.send_window_commands();
+                }
                 Ok(CoreMsg::ReloadCommands) => {
                     let ok = self.reload_commands("трей");
                     self.play(if ok { Reply::Done } else { Reply::Failed });
@@ -519,6 +531,7 @@ impl Core {
             } => {
                 tracing::info!(%device, sample_rate, "слушаю");
                 self.problem = None;
+                self.send_ui(UiMsg::Mic(device));
                 self.refresh_ui();
             }
             PipelineEvent::Wake(wake) => self.on_wake(wake),
@@ -617,6 +630,7 @@ impl Core {
         if !t.is_final {
             tracing::trace!(text = %t.text, ?resolution, "частичный текст");
             if !t.text.trim().is_empty() {
+                self.send_ui(UiMsg::Heard(t.text.clone()));
                 self.apply(Event::UserSpeaking);
             }
             // Ответ на вопрос — только по итогу фразы: короткое «кс» по началу
@@ -638,6 +652,9 @@ impl Core {
                 self.command(id, t.text, score, SlotValues::new(), now);
             }
             return;
+        }
+        if !t.text.trim().is_empty() {
+            self.send_ui(UiMsg::Heard(t.text.clone()));
         }
         if !self.early.on_final(t.utterance) {
             return; // по этой фразе команда уже выполнена раньше
@@ -1384,6 +1401,34 @@ impl Core {
         true
     }
 
+    fn send_window_commands(&self) {
+        let list = crate::main_window::commands_json(&self.registry, &self.permissions);
+        self.send_ui(UiMsg::Commands(list));
+    }
+
+    /// Решение пользователя из главного окна — как ответ на вопрос-разрешение.
+    fn set_permission(&mut self, id: &str, value: &str) {
+        let Some(command) = self.registry.get(id) else {
+            tracing::warn!(%id, "окно: нет такой команды");
+            return;
+        };
+        let result = match value {
+            "ask" => self.permissions.forget(command).map(|_| ()),
+            "always" => self.permissions.record(command, Answer::Always),
+            "never" => self.permissions.record(command, Answer::Never),
+            _ => {
+                tracing::warn!(%id, %value, "окно: непонятное разрешение");
+                return;
+            }
+        };
+        match result {
+            Ok(()) => tracing::info!(%id, %value, "разрешение изменено в окне"),
+            Err(e) => {
+                tracing::error!(error = %jarvis_core::error_chain(&e), %id, "разрешение не сохранилось")
+            }
+        }
+    }
+
     fn forget_permissions(&mut self, source: &str) {
         match self.permissions.forget_all() {
             Ok(n) => {
@@ -1737,7 +1782,11 @@ impl Core {
                 true,
             ) => Indicator::Listening,
         };
-        if self.ui.send(indicator).is_ok() {
+        self.send_ui(UiMsg::Indicator(indicator));
+    }
+
+    fn send_ui(&self, msg: UiMsg) {
+        if self.ui.send(msg).is_ok() {
             self.waker.wake();
         }
     }

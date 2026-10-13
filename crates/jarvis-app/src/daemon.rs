@@ -15,7 +15,7 @@
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use jarvis_app::resolver::{CommandResolver, hotword_phrases};
@@ -29,19 +29,38 @@ use jarvis_core::journal::ActionJournal;
 use jarvis_core::permissions::{PERMISSIONS_FILE, PermissionStore};
 use jarvis_core::root::project_path;
 use jarvis_platform::LoopEvent;
+use serde_json::json;
 
 use crate::core::{Core, CoreMsg, CoreParams, VoiceSetup};
 use crate::hearing;
-use crate::tray::{Indicator, MenuAction, Tray};
+use crate::main_window::{MainWindow, PageMsg, WindowModel};
+use crate::settings::{self, SettingsForm};
+use crate::tray::{MenuAction, Tray, UiMsg};
 
 pub const INSTANCE_NAME: &str = "JarvisVoiceAssistant";
 /// Страховочный такт цикла сообщений (см. jarvis_platform::run_message_loop).
 const UI_TICK: Duration = Duration::from_millis(250);
 const HOTKEY_EMERGENCY_STOP: i32 = 1;
+/// Сколько ждать завершения прежней копии при перезапуске.
+const RESTART_WAIT: Duration = Duration::from_secs(20);
 
-pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
-    let _instance = jarvis_platform::acquire_single_instance(INSTANCE_NAME)?
-        .context("Джарвис уже запущен — его значок в трее")?;
+/// `restart` — запуск из `--restart`: прежняя копия уже получила команду
+/// остановки, подождать, пока она завершится.
+pub fn run(root: &Path, config: Config, restart: bool) -> anyhow::Result<()> {
+    let mut instance = jarvis_platform::acquire_single_instance(INSTANCE_NAME)?;
+    let deadline = Instant::now() + RESTART_WAIT;
+    while instance.is_none() && restart && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        instance = jarvis_platform::acquire_single_instance(INSTANCE_NAME)?;
+    }
+    let Some(_instance) = instance else {
+        // Уже работает — открыть его окно (ярлык «Джарвис» при запущенном).
+        if jarvis_platform::send_show_signal(INSTANCE_NAME).unwrap_or(false) {
+            tracing::info!("Джарвис уже запущен — открываю его окно");
+            return Ok(());
+        }
+        anyhow::bail!("Джарвис уже запущен — его значок в трее");
+    };
 
     // Битый файл разрешений — не запускаемся: иначе первая же запись
     // разрешения затёрла бы его содержимое.
@@ -90,7 +109,24 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
             }
         })
         .context("не удалось запустить поток остановки")?;
+    // Главное окно — в настоящем разрешении экрана (до создания окон потока).
+    jarvis_platform::use_per_monitor_dpi();
     let mut tray = Tray::new(autostart::enabled())?;
+    let (ui_tx, ui_rx) = mpsc::channel::<UiMsg>();
+    // Повторный запуск Джарвиса — показать окно.
+    let show = jarvis_platform::create_show_signal(INSTANCE_NAME)?;
+    let show_tx = ui_tx.clone();
+    std::thread::Builder::new()
+        .name("jarvis-show".into())
+        .spawn(move || {
+            while show.wait().is_ok() {
+                if show_tx.send(UiMsg::ShowWindow).is_err() {
+                    break;
+                }
+                waker.wake();
+            }
+        })
+        .context("не удалось запустить поток показа окна")?;
 
     // Горячая клавиша аварийной остановки — в этом (главном) потоке.
     let _hotkey = match config.hotkeys.emergency_stop.trim() {
@@ -108,7 +144,8 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
     };
 
     let (core_tx, core_rx) = mpsc::channel::<CoreMsg>();
-    let (ui_tx, ui_rx) = mpsc::channel::<Indicator>();
+    let window_config = config.clone();
+    let webview_dir = resolve(root, &config.paths.data).join("webview");
     let commands_dir = resolve(root, &config.paths.commands);
     let wake_matcher = hearing.matcher.clone();
     let voice = voice_setup(root, &config);
@@ -149,14 +186,107 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
         .context("не удалось запустить поток ядра")?;
 
     tracing::info!("Джарвис в трее; выход — пункт «Выход» или Ctrl+C");
+    let mut model = WindowModel::default();
+    let mut window: Option<MainWindow> = None;
     jarvis_platform::run_message_loop(UI_TICK, |event| {
         if event == LoopEvent::Hotkey(HOTKEY_EMERGENCY_STOP) {
             let _ = core_tx.send(CoreMsg::EmergencyStop);
         }
-        while let Ok(indicator) = ui_rx.try_recv() {
-            tray.show(indicator);
+        let mut show_window = false;
+        while let Ok(msg) = ui_rx.try_recv() {
+            match msg {
+                UiMsg::ShowWindow => show_window = true,
+                UiMsg::Commands(list) => {
+                    if let Some(w) = &window {
+                        w.update(&list);
+                    }
+                }
+                UiMsg::Indicator(indicator) => {
+                    tray.show(indicator.clone());
+                    model.indicator = indicator;
+                    if let Some(w) = &window {
+                        w.update(&model.state_update());
+                    }
+                }
+                UiMsg::Heard(text) => {
+                    if let Some(w) = &window {
+                        w.update(&json!({ "heard": text }));
+                    }
+                    model.heard = text;
+                }
+                UiMsg::Mic(name) => {
+                    model.mic = Some(name);
+                    if let Some(w) = &window {
+                        w.update(&model.state_update());
+                    }
+                }
+            }
         }
-        match tray.poll_menu() {
+        if window.as_ref().is_some_and(|w| !w.is_open()) {
+            window = None; // память WebView2 освобождается вместе с окном
+            tracing::info!("главное окно закрыто");
+        }
+        if let Some(w) = window.as_mut() {
+            for msg in w.take_messages() {
+                tracing::debug!(kind = msg.kind(), "сообщение окна");
+                match msg {
+                    PageMsg::Ready => {
+                        w.update(&model.snapshot(&window_config));
+                        w.update(&settings::settings_json(
+                            root,
+                            &window_config,
+                            &settings::input_devices(),
+                            autostart::enabled(),
+                        ));
+                    }
+                    PageMsg::Autostart { on } => tray.set_autostart(autostart::set(on)),
+                    PageMsg::ApiKey { key } => {
+                        let note = save_api_key(&key);
+                        w.update(&json!({ "note": note, "status": { "ai": crate::main_window::ai_status(&window_config) } }));
+                    }
+                    PageMsg::Commands => {
+                        let _ = core_tx.send(CoreMsg::WindowCommands);
+                    }
+                    PageMsg::Permission { id, value } => {
+                        let _ = core_tx.send(CoreMsg::SetPermission { id, value });
+                    }
+                    PageMsg::Settings(values) => {
+                        let note = save_settings(root, &window_config, values);
+                        w.update(&note);
+                    }
+                    PageMsg::Restart => match spawn_restart() {
+                        Ok(()) => tracing::info!("перезапуск из окна настроек"),
+                        Err(e) => {
+                            tracing::error!(error = %e, "перезапуск не удался");
+                            w.update(
+                                &json!({ "note": "Перезапуск не удался — подробности в логе" }),
+                            );
+                        }
+                    },
+                }
+            }
+            if let Some(resources) = model.resources_due(Instant::now()) {
+                w.update(&resources);
+            }
+        }
+        let action = match tray.poll_menu() {
+            None if show_window => Some(MenuAction::OpenWindow),
+            action => action,
+        };
+        match action {
+            Some(MenuAction::OpenWindow) => match &window {
+                Some(w) => w.bring_to_front(),
+                None => match MainWindow::open(&webview_dir) {
+                    Ok(w) => {
+                        tracing::info!("главное окно открыто");
+                        window = Some(w);
+                    }
+                    Err(e) => tracing::error!(
+                        error = %jarvis_core::error_chain(e.as_ref()),
+                        "главное окно не открылось"
+                    ),
+                },
+            },
             Some(MenuAction::TogglePause) => {
                 let _ = core_tx.send(CoreMsg::TogglePause);
             }
@@ -174,6 +304,7 @@ pub fn run(root: &Path, config: Config) -> anyhow::Result<()> {
     })?;
 
     tracing::info!("завершение работы");
+    drop(window);
     let _ = core_tx.send(CoreMsg::Shutdown);
     if core.join().is_err() {
         tracing::error!("поток ядра завершился паникой");
@@ -234,6 +365,61 @@ pub fn check_hotkey(config: &Config) -> Result<Option<String>, String> {
     }
 }
 
+/// «Сохранить» в окне настроек: записать user.toml, вернуть ответ окну.
+fn save_settings(root: &Path, config: &Config, values: serde_json::Value) -> serde_json::Value {
+    let form: SettingsForm = match serde_json::from_value(values) {
+        Ok(form) => form,
+        Err(e) => {
+            tracing::warn!(error = %e, "окно прислало непонятные настройки");
+            return json!({ "note": "Не сохранено: окно прислало непонятные данные" });
+        }
+    };
+    match settings::save(root, config, &settings::input_devices(), &form) {
+        Ok(changed) if changed.is_empty() => json!({ "note": "Ничего не изменилось" }),
+        Ok(changed) => {
+            tracing::info!(changed = ?changed, "настройки сохранены из окна");
+            json!({
+                "note": format!("Сохранено: {}. Применится после перезапуска", changed.join(", ")),
+                "restart": true,
+            })
+        }
+        Err(e) => {
+            let why = jarvis_core::error_chain(&e);
+            tracing::warn!(error = %why, "настройки не сохранены");
+            json!({ "note": format!("Не сохранено: {why}") })
+        }
+    }
+}
+
+/// Перезапуск: новая копия (`jarvisw --restart`) остановит эту и запустится.
+fn spawn_restart() -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    std::process::Command::new(exe.with_file_name("jarvisw.exe"))
+        .arg("--restart")
+        .spawn()
+        .map(|_| ())
+}
+
+/// Ключ API из окна — в хранилище ОС; вернуть текст для окна. Ключ не
+/// пишется в лог.
+fn save_api_key(key: &str) -> String {
+    let key = key.trim();
+    if !jarvis_llm::secrets::looks_like_key(key) && !jarvis_llm::secrets::looks_like_server_key(key)
+    {
+        return "Это не похоже на ключ: только латиница, цифры и знаки, без пробелов".into();
+    }
+    match jarvis_llm::secrets::save_api_key(key) {
+        Ok(()) => {
+            tracing::info!("ключ API сохранён из окна");
+            "Ключ сохранён в Диспетчере учётных данных Windows".into()
+        }
+        Err(e) => {
+            tracing::error!(error = %jarvis_core::error_chain(&e), "ключ API не сохранился");
+            "Ключ не сохранился — подробности в логе".into()
+        }
+    }
+}
+
 /// Автозапуск при входе в Windows: `jarvisw.exe` рядом с `jarvis.exe`
 /// (без окна консоли).
 mod autostart {
@@ -245,7 +431,12 @@ mod autostart {
 
     /// Переключить; вернуть, включён ли автозапуск теперь.
     pub fn toggle() -> bool {
-        let result = if enabled() {
+        set(!enabled())
+    }
+
+    /// Включить или выключить; вернуть, включён ли автозапуск теперь.
+    pub fn set(on: bool) -> bool {
+        let result = if !on {
             jarvis_platform::set_autostart(NAME, None)
         } else {
             match std::env::current_exe() {

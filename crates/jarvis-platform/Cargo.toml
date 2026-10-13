@@ -10,6 +10,8 @@ publish.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# Дескриптор главного окна для страницы WebView2 (wry).
+raw-window-handle.workspace = true
 # windows (типизированный COM) — громкость (Core Audio API) и вкладки
 # браузера (UI Automation); версия та же, что уже тянет cpal.
 windows = { workspace = true, features = [
@@ -25,6 +27,7 @@ windows = { workspace = true, features = [
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Console",
@@ -32,11 +35,13 @@ windows-sys = { workspace = true, features = [
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
+    "Win32_System_ProcessStatus",
     "Win32_System_Registry",
     "Win32_System_Shutdown",
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

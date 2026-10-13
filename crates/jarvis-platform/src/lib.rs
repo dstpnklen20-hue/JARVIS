@@ -40,6 +40,11 @@ pub use windows::short_path;
 #[cfg(windows)]
 pub use windows::{TextWindow, show_text_window};
 
+#[cfg(windows)]
+pub use windows::{
+    AppWindow, AppWindowSpec, ProcessUsage, open_app_window, process_usage, use_per_monitor_dpi,
+};
+
 /// Системные действия команд: адреса, мультимедиа, процессы, клавиши, питание, громкость.
 #[cfg(windows)]
 pub use windows::{
@@ -49,7 +54,9 @@ pub use windows::{
 
 /// Мягкая остановка работающей копии извне (`jarvis --stop`).
 #[cfg(windows)]
-pub use windows::{StopSignal, create_stop_signal, send_stop_signal};
+pub use windows::{
+    StopSignal, create_show_signal, create_stop_signal, send_show_signal, send_stop_signal,
+};
 
 /// Пока жив, вторая копия программы не запустится.
 pub struct InstanceGuard {

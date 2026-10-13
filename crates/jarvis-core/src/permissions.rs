@@ -193,6 +193,25 @@ impl PermissionStore {
         )
     }
 
+    /// Сбросить решение по одной команде (главное окно, «Спрашивать»): снова
+    /// спрашивать. Снятая пометка `allow_always` остаётся. `Ok(false)` —
+    /// решения и не было.
+    pub fn forget(&mut self, command: &Command) -> Result<bool, PermissionError> {
+        let Some(entry) = self.file.commands.get_mut(&command.id) else {
+            return Ok(false);
+        };
+        if entry.decision.take().is_none() {
+            return Ok(false);
+        }
+        entry.action = None;
+        entry.updated = None;
+        if !entry.allow_always {
+            self.file.commands.remove(&command.id);
+        }
+        self.save()?;
+        Ok(true)
+    }
+
     /// «Забудь разрешения»: все «всегда» и «никогда» удаляются. Снятые
     /// пометки `allow_always` — настройка пользователя, они остаются.
     pub fn forget_all(&mut self) -> Result<usize, PermissionError> {
@@ -301,6 +320,22 @@ mod tests {
     }
 
     const ASK: Verdict = Verdict::Ask { offer_always: true };
+
+    #[test]
+    fn forget_one_asks_again_and_keeps_others() {
+        let (_d, mut s) = store();
+        let yt = command("yt", "https://y.com", false);
+        let gh = command("gh", "https://g.com", false);
+        s.record(&yt, Answer::Always).unwrap();
+        s.record(&gh, Answer::Never).unwrap();
+        assert!(s.forget(&yt).unwrap());
+        assert_eq!(s.verdict(&yt), ASK);
+        assert_eq!(s.verdict(&gh), Verdict::Denied);
+        assert!(!s.forget(&yt).unwrap(), "второй раз сбрасывать нечего");
+        let reloaded = PermissionStore::load(s.path()).unwrap();
+        assert_eq!(reloaded.verdict(&yt), ASK);
+        assert_eq!(reloaded.verdict(&gh), Verdict::Denied);
+    }
 
     #[test]
     fn first_run_asks() {

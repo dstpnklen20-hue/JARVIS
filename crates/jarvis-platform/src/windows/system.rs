@@ -135,3 +135,65 @@ fn read_reg_dword(key: &str, value: &str) -> Result<u32, PlatformError> {
     }
     Ok(data)
 }
+
+/// Сколько ресурсов занимает текущий процесс.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessUsage {
+    /// Рабочий набор (занятая физическая память), байты.
+    pub memory: u64,
+    /// Процессорное время с запуска (ядро + пользователь).
+    pub cpu: std::time::Duration,
+}
+
+pub fn process_usage() -> Result<ProcessUsage, PlatformError> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: псевдодескриптор текущего процесса не закрывается; структуры
+    // валидны для записи, размер передан верный.
+    let (times_ok, memory_ok, counters) = unsafe {
+        let process = GetCurrentProcess();
+        let times_ok = GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user);
+        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        let memory_ok = GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        );
+        (times_ok, memory_ok, counters)
+    };
+    if times_ok == 0 {
+        return Err(last_error("GetProcessTimes"));
+    }
+    if memory_ok == 0 {
+        return Err(last_error("GetProcessMemoryInfo"));
+    }
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    // FILETIME — сотни наносекунд.
+    let cpu = std::time::Duration::from_nanos((ticks(kernel) + ticks(user)) * 100);
+    Ok(ProcessUsage {
+        memory: counters.WorkingSetSize as u64,
+        cpu,
+    })
+}
+
+#[cfg(test)]
+mod usage_tests {
+    #[test]
+    fn current_process_uses_some_memory_and_cpu() {
+        // Немного поработать, чтобы процессорное время было не нулевым.
+        let sum: u64 = (0..2_000_000u64).map(|i| i % 7).sum();
+        assert!(sum > 0);
+        let usage = super::process_usage().unwrap();
+        assert!(usage.memory > 1024 * 1024, "{usage:?}");
+        assert!(!usage.cpu.is_zero(), "{usage:?}");
+    }
+}

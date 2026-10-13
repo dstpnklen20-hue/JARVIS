@@ -7,8 +7,10 @@ mod core;
 mod daemon;
 mod enroll;
 mod hearing;
+mod main_window;
 mod record;
 mod say;
+mod settings;
 mod tray;
 
 use std::path::PathBuf;
@@ -23,7 +25,7 @@ use jarvis_core::{Config, logging, root};
     name = "jarvis",
     version,
     about = "Джарвис — голосовой ассистент для ПК",
-    group(ArgGroup::new("mode").args(["check", "stop", "bench", "enroll", "voice_test", "enroll_from", "record", "say", "set_api_key", "forget_api_key", "ask"]))
+    group(ArgGroup::new("mode").args(["check", "stop", "restart", "bench", "enroll", "voice_test", "enroll_from", "record", "say", "set_api_key", "forget_api_key", "ask"]))
 )]
 struct Cli {
     /// Проверить окружение, конфиг и модели, напечатать отчёт и выйти.
@@ -33,6 +35,11 @@ struct Cli {
     /// Мягко остановить работающего Джарвиса.
     #[arg(long)]
     stop: bool,
+
+    /// Перезапустить: остановить работающего, дождаться и запуститься
+    /// (кнопка «Перезапустить» в окне настроек).
+    #[arg(long)]
+    restart: bool,
 
     /// Сохранить ключ API Anthropic для нейросети (ввод скрыт; ключ — в
     /// Диспетчере учётных данных Windows, не в файлах).
@@ -140,6 +147,12 @@ fn main() -> ExitCode {
             }
         };
     }
+    if cli.restart
+        && let Err(e) = jarvis_platform::send_stop_signal(daemon::INSTANCE_NAME)
+    {
+        eprintln!("Ошибка: {}", jarvis_core::error_chain(&e));
+        return ExitCode::FAILURE;
+    }
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -191,7 +204,7 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
     if config.general.dry_run {
         tracing::warn!("режим dry-run: команды будут распознаваться, но не выполняться");
     }
-    daemon::run(&root, config)
+    daemon::run(&root, config, cli.restart)
 }
 
 /// Паника пишется в лог (а не только в консоль, которой может не быть).

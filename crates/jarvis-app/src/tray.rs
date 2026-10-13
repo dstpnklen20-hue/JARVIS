@@ -1,10 +1,11 @@
 //! Значок в трее: индикатор состояния и меню «Пауза» / «Забыть разрешения» / «Выход».
+//! Левый щелчок по значку открывает главное окно.
 //!
 //! Работает в главном потоке, где крутится цикл сообщений Windows.
 
 use anyhow::Context as _;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 /// Что показывает значок.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,18 @@ pub enum Indicator {
 }
 
 impl Indicator {
+    /// Имя состояния для главного окна (ui/index.html, `STATES`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Indicator::Starting => "starting",
+            Indicator::Idle => "idle",
+            Indicator::Listening => "listening",
+            Indicator::Asking => "asking",
+            Indicator::Paused => "paused",
+            Indicator::Problem(_) => "problem",
+        }
+    }
+
     fn color(&self) -> [u8; 3] {
         match self {
             Indicator::Starting => [0xE0, 0xA0, 0x20],
@@ -50,9 +63,24 @@ impl Indicator {
     }
 }
 
+/// Что ядро сообщает главному потоку — значку и главному окну.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiMsg {
+    Indicator(Indicator),
+    /// Что Джарвис расслышал (частичный или итоговый текст фразы).
+    Heard(String),
+    /// Открытый микрофон.
+    Mic(String),
+    /// Показать главное окно (повторный запуск Джарвиса).
+    ShowWindow,
+    /// Список команд с разрешениями для вкладки «Команды».
+    Commands(serde_json::Value),
+}
+
 /// Действие пользователя в меню.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
+    OpenWindow,
     TogglePause,
     ForgetPermissions,
     ReloadCommands,
@@ -62,6 +90,7 @@ pub enum MenuAction {
 
 pub struct Tray {
     icon: TrayIcon,
+    open: MenuItem,
     pause: CheckMenuItem,
     forget: MenuItem,
     reload: MenuItem,
@@ -73,6 +102,7 @@ pub struct Tray {
 impl Tray {
     /// `autostart` — включён ли сейчас запуск при входе в Windows.
     pub fn new(autostart_on: bool) -> anyhow::Result<Self> {
+        let open = MenuItem::new("Открыть Джарвиса", true, None);
         let pause = CheckMenuItem::new("Пауза", true, false, None);
         let autostart =
             CheckMenuItem::new("Запускать при входе в Windows", true, autostart_on, None);
@@ -81,6 +111,8 @@ impl Tray {
         let quit = MenuItem::new("Выход", true, None);
         let menu = Menu::new();
         menu.append_items(&[
+            &open,
+            &PredefinedMenuItem::separator(),
             &pause,
             &reload,
             &forget,
@@ -92,12 +124,15 @@ impl Tray {
         let shown = Indicator::Starting;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
+            // Левый щелчок — окно, меню — по правому.
+            .with_menu_on_left_click(false)
             .with_tooltip(shown.tooltip())
             .with_icon(render_icon(shown.color())?)
             .build()
             .context("не удалось создать значок в трее")?;
         Ok(Self {
             icon,
+            open,
             pause,
             reload,
             forget,
@@ -128,10 +163,24 @@ impl Tray {
         self.autostart.set_checked(on);
     }
 
-    /// Следующее действие из меню, если пользователь что-то выбрал.
+    /// Следующее действие из меню (или щелчок по значку), если пользователь
+    /// что-то выбрал.
     pub fn poll_menu(&self) -> Option<MenuAction> {
+        // Наведение и движение мыши над значком — тоже события: выбираем все.
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                return Some(MenuAction::OpenWindow);
+            }
+        }
         let event = MenuEvent::receiver().try_recv().ok()?;
-        if event.id == *self.pause.id() {
+        if event.id == *self.open.id() {
+            Some(MenuAction::OpenWindow)
+        } else if event.id == *self.pause.id() {
             Some(MenuAction::TogglePause)
         } else if event.id == *self.reload.id() {
             Some(MenuAction::ReloadCommands)
@@ -152,6 +201,11 @@ const SIZE: u32 = 32;
 const SUPERSAMPLE: u32 = 4;
 /// Тёмных сегментов на внешнем кольце реактора.
 const SEGMENTS: f32 = 10.0;
+
+/// Значок главного окна: реактор в цвете ожидания; RGBA и сторона квадрата.
+pub fn window_icon() -> (Vec<u8>, u32) {
+    (icon_pixels(Indicator::Idle.color()), SIZE)
+}
 
 /// Дуговой реактор: светящееся кольцо с тёмными сегментами, зазор, ядро.
 /// Свечение окрашено в цвет состояния.
