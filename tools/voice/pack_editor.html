@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Голос Джарвиса — редактор</title>
+<style>
+:root {
+  --bg: #f5f6f8; --fg: #1b1f24; --muted: #5b6572; --card: #ffffff; --line: #dde2e8;
+  --accent: #2f6fec; --wave: #6f8fbf; --sel: rgba(47, 111, 236, .18); --head: #d64545;
+  --ok: #1f9d55; --warn: #b7791f; --bad: #d64545;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171b; --fg: #e7eaee; --muted: #9aa4b1; --card: #1c2026; --line: #2c323a;
+    --accent: #6b9bff; --wave: #7f9dcc; --sel: rgba(107, 155, 255, .22); --head: #ff6b6b;
+    --ok: #45c07a; --warn: #e0a84a; --bad: #ff6b6b;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171b; --fg: #e7eaee; --muted: #9aa4b1; --card: #1c2026; --line: #2c323a;
+  --accent: #6b9bff; --wave: #7f9dcc; --sel: rgba(107, 155, 255, .22); --head: #ff6b6b;
+  --ok: #45c07a; --warn: #e0a84a; --bad: #ff6b6b;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, "Segoe UI", sans-serif; }
+main { max-width: 1000px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+h1 { font-size: 22px; margin: 4px 0; }
+h2 { font-size: 16px; margin: 24px 0 8px; }
+h2 small { color: var(--muted); font-weight: normal; }
+.hint { color: var(--muted); font-size: 13px; margin: 4px 0 12px; }
+.banner { position: sticky; top: 0; z-index: 5; background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 12px; margin: 8px 0; display: none; align-items: center; gap: 12px; flex-wrap: wrap; }
+.banner.show { display: flex; }
+.clip { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 8px 0; }
+.clip.off { opacity: .6; }
+.top { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.name { font-weight: 600; }
+.info { color: var(--muted); font-size: 13px; }
+.dirty { color: var(--warn); font-size: 13px; font-weight: 600; }
+canvas { width: 100%; height: 84px; display: block; margin: 8px 0; border-radius: 6px; background: var(--bg); cursor: crosshair; touch-action: none; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+button { border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 6px;
+  padding: 5px 9px; cursor: pointer; font: inherit; font-size: 13px; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer; }
+.gain { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+input[type=range] { width: 120px; }
+.sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+.msg { font-size: 13px; }
+.msg.err { color: var(--bad); }
+.msg.ok { color: var(--ok); }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div>
+    <h1>Голос Джарвиса — редактор</h1>
+    <div class="hint" id="packName">Загрузка…</div>
+  </div>
+  <button id="restart">Перезапустить Джарвиса</button>
+</header>
+<div class="hint">
+  Выделите кусок мышью на волне. «Оставить выделенное» обрезает всё вокруг, «Вырезать выделенное»
+  удаляет кусок с плавной склейкой. «Пауза перед „сэр“ ×½» сама находит самую длинную паузу внутри
+  фразы. Перед каждым сохранением делается копия (data/voice-backup), «Вернуть исходную» достаёт самую
+  первую. Галочка «в работе» включает вариант ответа — Джарвис чередует включённые.
+  Изменения Джарвис услышит после перезапуска.
+</div>
+<div class="banner" id="banner"><span>Есть сохранённые изменения — Джарвис применит их после перезапуска.</span>
+  <button class="primary" id="restart2">Перезапустить Джарвиса</button></div>
+<div id="groups"></div>
+</main>
+<script>
+"use strict";
+const TOKEN = "{{TOKEN}}";
+// Ошибка в странице — видна сразу под заголовком.
+window.addEventListener("error", (e) => { document.getElementById("packName").textContent = "Ошибка страницы: " + e.message; });
+window.addEventListener("unhandledrejection", (e) => { document.getElementById("packName").textContent = "Ошибка страницы: " + (e.reason && e.reason.message || e.reason); });
+const FADE_SECS = 0.01;
+let audioCtx = null;
+let playing = null; // { source, clip, startAt, offset }
+
+// ---------- WAV ----------
+function parseWav(buf) {
+  const v = new DataView(buf);
+  const tag = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
+  if (tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new Error("не WAV");
+  let fmt = null, data = null, off = 12;
+  while (off + 8 <= v.byteLength) {
+    const id = tag(off), size = v.getUint32(off + 4, true);
+    if (id === "fmt ") fmt = { format: v.getUint16(off + 8, true), ch: v.getUint16(off + 10, true),
+      rate: v.getUint32(off + 12, true), bits: v.getUint16(off + 22, true) };
+    else if (id === "data") data = { off: off + 8, size: Math.min(size, v.byteLength - off - 8) };
+    off += 8 + size + (size & 1);
+  }
+  if (!fmt || !data) throw new Error("WAV без fmt/data");
+  const isFloat = fmt.format === 3 || (fmt.format === 0xFFFE && fmt.bits === 32);
+  const bytes = fmt.bits / 8, frames = Math.floor(data.size / (bytes * fmt.ch));
+  const out = new Float32Array(frames);
+  for (let i = 0; i < frames; i++) {
+    let sum = 0;
+    for (let c = 0; c < fmt.ch; c++) {
+      const p = data.off + (i * fmt.ch + c) * bytes;
+      if (isFloat) sum += v.getFloat32(p, true);
+      else if (fmt.bits === 16) sum += v.getInt16(p, true) / 32768;
+      else if (fmt.bits === 24) sum += ((v.getUint8(p) | (v.getUint8(p + 1) << 8) | (v.getInt8(p + 2) << 16))) / 8388608;
+      else throw new Error(`${fmt.bits}-битный WAV не поддерживается`);
+    }
+    out[i] = sum / fmt.ch;
+  }
+  return { samples: out, rate: fmt.rate };
+}
+
+function encodeWav(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); str(8, "WAVE");
+  str(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, Math.round(s * 32767), true);
+  }
+  return buf;
+}
+
+// ---------- правки ----------
+// Каждая правка применяется к результату предыдущих; «Отменить» убирает последнюю.
+function applyOp(s, op, rate) {
+  if (op.type === "gain") {
+    const k = Math.pow(10, op.db / 20);
+    return s.map((x) => x * k);
+  }
+  if (op.type === "keep") return s.slice(op.a, op.b);
+  if (op.type === "silence") {
+    const out = new Float32Array(s.length + op.len);
+    out.set(s, 0); // тишина в конце
+    return out;
+  }
+  if (op.type === "cut") {
+    const fade = Math.min(Math.round(FADE_SECS * rate), op.a, s.length - op.b);
+    const out = new Float32Array(s.length - (op.b - op.a) - fade);
+    out.set(s.subarray(0, op.a - fade), 0);
+    for (let i = 0; i < fade; i++) {
+      const t = (i + 0.5) / fade;
+      out[op.a - fade + i] = s[op.a - fade + i] * (1 - t) + s[op.b + i] * t;
+    }
+    out.set(s.subarray(op.b + fade), op.a);
+    return out;
+  }
+  return s;
+}
+
+function render(clip) {
+  let s = clip.orig;
+  for (const op of clip.ops) s = applyOp(s, op, clip.rate);
+  return s;
+}
+
+// Самая длинная пауза внутри фразы (тише −35 дБ от пика, от 50 мс) — как tools/voice/tighten.py.
+function longestInnerGap(s, rate) {
+  const hop = Math.round(rate * 0.01), frames = Math.floor(s.length / hop);
+  const rms = new Float32Array(frames);
+  let peak = 1e-9;
+  for (let f = 0; f < frames; f++) {
+    let sum = 0;
+    for (let i = f * hop; i < (f + 1) * hop; i++) sum += s[i] * s[i];
+    rms[f] = Math.sqrt(sum / hop + 1e-12);
+    peak = Math.max(peak, rms[f]);
+  }
+  let best = null, start = -1;
+  for (let f = 0; f < frames; f++) {
+    const quiet = 20 * Math.log10(rms[f] / peak) < -35;
+    if (quiet && start < 0) start = f;
+    if (!quiet && start >= 0) {
+      if (start > 0 && (f - start) * 0.01 >= 0.05 && (!best || f - start > best[1] - best[0])) best = [start, f];
+      start = -1;
+    }
+  }
+  return best && [best[0] * hop, best[1] * hop];
+}
+
+// ---------- страница ----------
+async function api(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: { "X-Token": TOKEN, ...(options.headers || {}) } });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function fmtSecs(n, rate) { return (n / rate).toFixed(2) + " с"; }
+
+function makeClip(info, group) {
+  const el = document.createElement("div");
+  el.className = "clip" + (info.enabled ? "" : " off");
+  el.innerHTML = `
+    <div class="top">
+      <span class="name"></span>
+      ${group.toggle ? '<label class="toggle"><input type="checkbox"> в работе</label>' : ""}
+      <span class="info"></span><span class="dirty"></span><span class="msg"></span>
+    </div>
+    <canvas></canvas>
+    <div class="row">
+      <button data-a="play">▶ Слушать</button>
+      <button data-a="playsel" disabled>▶ Выделенное</button>
+      <button data-a="stop">■</button>
+      <span class="sep"></span>
+      <button data-a="keep" disabled>Оставить выделенное</button>
+      <button data-a="cut" disabled>Вырезать выделенное</button>
+      <button data-a="pause">Пауза перед «сэр» ×½</button>
+      <button data-a="tail">+0.1 с тишины в конце</button>
+      <span class="gain">Громкость <input type="range" min="-12" max="6" step="0.5" value="0"><span>0 дБ</span></span>
+      <span class="sep"></span>
+      <button data-a="undo" disabled>Отменить</button>
+      <button data-a="reset" disabled>Сбросить</button>
+      <button data-a="save" class="primary" disabled>Сохранить</button>
+      <button data-a="restore">Вернуть исходную</button>
+    </div>`;
+  el.querySelector(".name").textContent = info.name;
+  const clip = { info, el, orig: null, rate: 22050, ops: [], rendered: null, sel: null, gainDb: 0,
+    canvas: el.querySelector("canvas"), msg: el.querySelector(".msg") };
+  const $ = (a) => el.querySelector(`[data-a="${a}"]`);
+  const slider = el.querySelector("input[type=range]"), sliderText = el.querySelector(".gain span");
+  const checkbox = el.querySelector("input[type=checkbox]");
+  if (checkbox) checkbox.checked = info.enabled;
+
+  clip.update = () => {
+    if (!clip.orig) return; // запись ещё загружается
+    clip.rendered = render(clip);
+    if (clip.gainDb !== 0) clip.rendered = applyOp(clip.rendered, { type: "gain", db: clip.gainDb }, clip.rate);
+    const dirty = clip.ops.length > 0 || clip.gainDb !== 0;
+    let peak = 0;
+    for (const x of clip.rendered) peak = Math.max(peak, Math.abs(x));
+    el.querySelector(".info").textContent = `${fmtSecs(clip.rendered.length, clip.rate)}` +
+      (clip.sel ? ` · выделено ${fmtSecs(clip.sel[1] - clip.sel[0], clip.rate)}` : "") +
+      (peak > 1 ? " · громкость выше предела, будет срезана" : "");
+    el.querySelector(".dirty").textContent = dirty ? "изменено" : "";
+    $("undo").disabled = clip.ops.length === 0;
+    $("reset").disabled = !dirty;
+    $("save").disabled = !dirty;
+    $("restore").disabled = !info.backups;
+    const hasSel = !!clip.sel && clip.sel[1] - clip.sel[0] > 0;
+    for (const a of ["playsel", "keep", "cut"]) $(a).disabled = !hasSel;
+    draw(clip);
+  };
+
+  const push = (op) => { clip.ops.push(op); clip.sel = null; clip.update(); };
+  const say = (text, kind = "") => { clip.msg.textContent = text; clip.msg.className = "msg " + kind; };
+
+  // Выделение мышью / пальцем.
+  let dragFrom = null;
+  const pos = (e) => {
+    const r = clip.canvas.getBoundingClientRect();
+    const x = Math.min(Math.max(0, e.clientX - r.left), r.width);
+    return Math.round((x / r.width) * clip.rendered.length);
+  };
+  clip.canvas.addEventListener("pointerdown", (e) => {
+    if (!clip.rendered) return;
+    clip.canvas.setPointerCapture(e.pointerId);
+    dragFrom = pos(e); clip.sel = null; clip.update();
+  });
+  clip.canvas.addEventListener("pointermove", (e) => {
+    if (dragFrom === null) return;
+    const p = pos(e);
+    clip.sel = [Math.min(dragFrom, p), Math.max(dragFrom, p)];
+    clip.update();
+  });
+  clip.canvas.addEventListener("pointerup", () => {
+    if (clip.sel && clip.sel[1] - clip.sel[0] < clip.rate * 0.005) clip.sel = null;
+    dragFrom = null; clip.update();
+  });
+
+  $("play").onclick = () => play(clip, 0, clip.rendered.length);
+  $("playsel").onclick = () => clip.sel && play(clip, clip.sel[0], clip.sel[1]);
+  $("stop").onclick = stop;
+  $("keep").onclick = () => push({ type: "keep", a: clip.sel[0], b: clip.sel[1] });
+  $("cut").onclick = () => push({ type: "cut", a: clip.sel[0], b: clip.sel[1] });
+  $("tail").onclick = () => push({ type: "silence", len: Math.round(clip.rate * 0.1) });
+  $("pause").onclick = () => {
+    const s = render(clip), gap = longestInnerGap(s, clip.rate);
+    if (!gap) { say("пауз внутри фразы не нашлось"); return; }
+    const fade = Math.round(FADE_SECS * clip.rate), len = gap[1] - gap[0];
+    const cut = Math.round(len * 0.5) - fade;
+    if (cut <= 0) { say("пауза и так короткая"); return; }
+    const a = gap[0] + Math.round((len - cut) / 2);
+    push({ type: "cut", a, b: a + cut });
+    say(`пауза ${fmtSecs(len, clip.rate)} → ${fmtSecs(len - cut - fade, clip.rate)}`, "ok");
+  };
+  slider.oninput = () => { clip.gainDb = Number(slider.value); sliderText.textContent = `${clip.gainDb > 0 ? "+" : ""}${clip.gainDb} дБ`; clip.update(); };
+  $("undo").onclick = () => { clip.ops.pop(); clip.sel = null; clip.update(); };
+  $("reset").onclick = () => { clip.ops = []; clip.gainDb = 0; slider.value = 0; sliderText.textContent = "0 дБ"; clip.sel = null; clip.update(); say(""); };
+  $("save").onclick = async () => {
+    stop();
+    try {
+      const data = await api(`/api/save/${clip.info.area}/${encodeURIComponent(clip.info.name)}`, {
+        method: "POST", body: encodeWav(clip.rendered, clip.rate) });
+      refreshBackups(data);
+      clip.orig = clip.rendered; clip.ops = []; clip.gainDb = 0; slider.value = 0; sliderText.textContent = "0 дБ";
+      clip.update(); say("сохранено", "ok"); showBanner();
+    } catch (err) { say(err.message, "err"); }
+  };
+  $("restore").onclick = async () => {
+    if (!confirm(`Вернуть исходную запись ${clip.info.name}? Текущая останется в копиях.`)) return;
+    stop();
+    try {
+      const data = await api(`/api/restore/${clip.info.area}/${encodeURIComponent(clip.info.name)}`, { method: "POST" });
+      refreshBackups(data); await load(clip); say("возвращена исходная", "ok"); showBanner();
+    } catch (err) { say(err.message, "err"); }
+  };
+  if (checkbox) checkbox.onchange = async () => {
+    try {
+      const data = await api("/api/toggle", { method: "POST", body: JSON.stringify({ name: info.name, enabled: checkbox.checked }) });
+      info.enabled = checkbox.checked; el.classList.toggle("off", !checkbox.checked);
+      refreshBackups(data); say(checkbox.checked ? "включён" : "выключен", "ok"); showBanner();
+    } catch (err) { checkbox.checked = !checkbox.checked; say(err.message, "err"); }
+  };
+  return clip;
+}
+
+async function load(clip) {
+  const res = await fetch(`/audio/${clip.info.area}/${encodeURIComponent(clip.info.name)}?t=${Date.now()}`);
+  const wav = parseWav(await res.arrayBuffer());
+  clip.orig = wav.samples; clip.rate = wav.rate; clip.ops = []; clip.gainDb = 0; clip.sel = null;
+  // Масштаб волны — по пику исходной записи: тихие записи видно, а изменение громкости заметно.
+  let peak = 0;
+  for (const x of clip.orig) peak = Math.max(peak, Math.abs(x));
+  clip.view = 0.9 / Math.max(peak, 0.05);
+  clip.update();
+}
+
+function draw(clip) {
+  const c = clip.canvas, dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const g = c.getContext("2d"), css = getComputedStyle(document.documentElement);
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const s = clip.rendered;
+  if (!s || !s.length) return;
+  if (clip.sel) {
+    g.fillStyle = css.getPropertyValue("--sel");
+    g.fillRect((clip.sel[0] / s.length) * w, 0, ((clip.sel[1] - clip.sel[0]) / s.length) * w, h);
+  }
+  g.fillStyle = css.getPropertyValue("--wave");
+  const per = s.length / w;
+  for (let x = 0; x < w; x++) {
+    let lo = 0, hi = 0;
+    const from = Math.floor(x * per), to = Math.min(s.length, Math.floor((x + 1) * per) + 1);
+    for (let i = from; i < to; i++) { if (s[i] < lo) lo = s[i]; if (s[i] > hi) hi = s[i]; }
+    const k = clip.view || 1;
+    const y1 = (0.5 - Math.min(hi * k, 1) / 2) * h, y2 = (0.5 - Math.max(lo * k, -1) / 2) * h;
+    g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+  }
+  if (playing && playing.clip === clip && audioCtx) {
+    const t = playing.offset + (audioCtx.currentTime - playing.startAt) * clip.rate;
+    g.fillStyle = css.getPropertyValue("--head");
+    g.fillRect((t / s.length) * w, 0, 2, h);
+  }
+}
+
+function play(clip, from, to) {
+  stop();
+  audioCtx = audioCtx || new AudioContext();
+  const part = clip.rendered.slice(from, to);
+  if (!part.length) return;
+  const buffer = audioCtx.createBuffer(1, part.length, clip.rate);
+  buffer.copyToChannel(part.map((x) => Math.max(-1, Math.min(1, x))), 0);
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+  playing = { source, clip, startAt: audioCtx.currentTime, offset: from };
+  source.onended = () => { if (playing && playing.source === source) { playing = null; draw(clip); } };
+  source.start();
+  const tick = () => { if (playing && playing.source === source) { draw(clip); requestAnimationFrame(tick); } };
+  requestAnimationFrame(tick);
+}
+
+function stop() {
+  if (playing) { const c = playing.clip; try { playing.source.stop(); } catch (e) {} playing = null; draw(c); }
+}
+
+const clips = [];
+function refreshBackups(data) {
+  const counts = new Map();
+  for (const g of data.groups) for (const c of g.clips) counts.set(`${c.area}/${c.name}`, c.backups);
+  for (const clip of clips) { clip.info.backups = counts.get(`${clip.info.area}/${clip.info.name}`) || 0; clip.update(); }
+}
+
+function showBanner() { document.getElementById("banner").classList.add("show"); }
+
+async function restart() {
+  try { await api("/api/restart", { method: "POST" }); document.getElementById("banner").classList.remove("show"); alert("Джарвис перезапускается."); }
+  catch (err) { alert("Не удалось: " + err.message); }
+}
+document.getElementById("restart").onclick = restart;
+document.getElementById("restart2").onclick = restart;
+
+(async () => {
+  try {
+    const data = await api("/api/pack");
+    document.getElementById("packName").textContent = `Пакет: ${data.pack}`;
+    const root = document.getElementById("groups");
+    for (const group of data.groups) {
+      const h = document.createElement("h2");
+      const on = group.clips.filter((c) => c.enabled).length;
+      h.innerHTML = `<span></span> <small></small>`;
+      h.querySelector("span").textContent = group.title;
+      h.querySelector("small").textContent = group.toggle ? `${group.key} · в работе ${on} из ${group.clips.length}` : group.key;
+      root.appendChild(h);
+      for (const info of group.clips) {
+        const clip = makeClip(info, group);
+        root.appendChild(clip.el);
+        clips.push(clip);
+        load(clip).catch((err) => { clip.msg.textContent = err.message; clip.msg.className = "msg err"; });
+      }
+    }
+  } catch (err) {
+    document.getElementById("packName").textContent = "Ошибка: " + err.message;
+  }
+})();
+window.addEventListener("resize", () => clips.forEach((c) => c.rendered && draw(c)));
+</script>
+</body>
+</html>
