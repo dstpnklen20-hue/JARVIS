@@ -83,6 +83,10 @@ pub enum ActionSpec {
         #[serde(default)]
         args: Vec<String>,
         working_dir: Option<PathBuf>,
+        /// Имя процесса (`firefox.exe`): уже запущена — вывести её окно вперёд
+        /// вместо нового запуска.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focus: Option<String>,
     },
     /// Запустить скрипт из папки пакета и дождаться его (с тайм-аутом).
     RunScript {
@@ -192,9 +196,15 @@ impl ActionSpec {
                 Some(n) => format!("нажмёт {operation:?} ×{n}"),
                 None => format!("нажмёт {operation:?}"),
             },
-            ActionSpec::LaunchApp { path, args, .. } => {
-                format!("запустит {path}{}", args_text(args))
-            }
+            ActionSpec::LaunchApp {
+                path, args, focus, ..
+            } => match focus {
+                Some(name) => format!(
+                    "выведет вперёд окно {name}, если программа запущена, иначе запустит {path}{}",
+                    args_text(args)
+                ),
+                None => format!("запустит {path}{}", args_text(args)),
+            },
             ActionSpec::RunScript {
                 path,
                 args,
@@ -299,10 +309,12 @@ impl ActionSpec {
                 path,
                 args,
                 working_dir,
+                focus,
             } => ActionSpec::LaunchApp {
                 path: path.clone(),
                 args: args.iter().map(fill).collect(),
                 working_dir: working_dir.clone(),
+                focus: focus.clone(),
             },
             ActionSpec::RunScript {
                 path,
@@ -661,7 +673,11 @@ fn validate_action(
             path,
             args: _,
             working_dir,
+            focus,
         } => {
+            if let Some(name) = focus {
+                process_name(name).map_err(|e| format!("launch_app: focus {e}"))?;
+            }
             no_slots_in_path(path)?;
             let trimmed = path.trim();
             if trimmed.is_empty() {
@@ -784,14 +800,7 @@ fn validate_action(
             Ok(())
         }
         ActionSpec::WaitProcess { name, timeout_sec } => {
-            let trimmed = name.trim();
-            let plain_name = !trimmed.is_empty()
-                && !trimmed.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']);
-            if !plain_name || !trimmed.to_ascii_lowercase().ends_with(".exe") {
-                return Err(format!(
-                    "wait_process: name = «{name}» — нужно имя файла программы, например faceitclient.exe"
-                ));
-            }
+            process_name(name).map_err(|e| format!("wait_process: name {e}"))?;
             if !(1..=MAX_PROCESS_WAIT_SEC).contains(timeout_sec) {
                 return Err(format!(
                     "wait_process: timeout_sec = {timeout_sec} вне диапазона 1–{MAX_PROCESS_WAIT_SEC}"
@@ -821,6 +830,20 @@ fn validate_action(
             }
             Ok(())
         }
+    }
+}
+
+/// Имя файла программы для поиска процесса: без папок, оканчивается на .exe.
+fn process_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    let plain =
+        !trimmed.is_empty() && !trimmed.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']);
+    if plain && trimmed.to_ascii_lowercase().ends_with(".exe") {
+        Ok(())
+    } else {
+        Err(format!(
+            "= «{name}» — нужно имя файла программы, например firefox.exe"
+        ))
     }
 }
 

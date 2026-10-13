@@ -13,7 +13,7 @@ mod stop;
 mod system;
 
 pub use actions::{MediaKey, media_key, open_url};
-pub use browser::{activate_browser_tab, focus_browser, process_running};
+pub use browser::{activate_browser_tab, focus_app, focus_browser, process_running};
 pub use dialog::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 pub use event_loop::{
     LoopEvent, Waker, current_waker, install_ctrl_handler, notify_shutdown_complete,

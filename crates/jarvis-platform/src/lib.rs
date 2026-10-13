@@ -31,8 +31,8 @@ pub use windows::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 /// Системные действия команд: адреса, мультимедиа, процессы, клавиши, питание, громкость.
 #[cfg(windows)]
 pub use windows::{
-    MediaKey, Power, RunEnd, activate_browser_tab, focus_browser, media_key, open_url, power,
-    press_keys, process_running, release_all_keys, run_and_wait, set_volume, spawn_detached,
+    MediaKey, Power, RunEnd, activate_browser_tab, focus_app, focus_browser, media_key, open_url,
+    power, press_keys, process_running, release_all_keys, run_and_wait, set_volume, spawn_detached,
 };
 
 /// Мягкая остановка работающей копии извне (`jarvis --stop`).

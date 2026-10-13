@@ -30,8 +30,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    BringWindowToTop, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow,
+    GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::BOOL;
 
@@ -42,6 +43,7 @@ const FIREFOX_TAB_STRIP: &str = "tabbrowser-tabs";
 const FIREFOX_TAB_GROUP: &str = "tab-group-label";
 /// Сколько ждать, пока вкладки раскрытой группы появятся в дереве (обычно ~60 мс).
 const GROUP_EXPAND_WAIT: std::time::Duration = std::time::Duration::from_millis(600);
+const GROUP_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 /// Виртуальная клавиша без назначения (0xE8 — «unassigned» в документации
 /// Windows): её «нажатие» ни на что не влияет, но снимает запрет на смену фокуса.
 const VK_UNASSIGNED: u16 = 0xE8;
@@ -122,22 +124,48 @@ fn select_tab(
                     continue;
                 }
                 toggle.Expand()?;
-                let deadline = std::time::Instant::now() + GROUP_EXPAND_WAIT;
-                let found = loop {
-                    let (hit, count) = find_tab(&tabs_strip, &tab, matches)?;
-                    if hit.is_some() || count > seen || std::time::Instant::now() >= deadline {
-                        break hit;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                };
-                if let Some(title) = found {
+                if let Some(title) = search_expanded(&tabs_strip, &tab, matches, seen)? {
                     return Ok(Some((hwnd, title)));
                 }
-                // Не здесь — свернуть, как было.
+                // Не здесь — свернуть, как было, и дождаться, пока вкладки
+                // группы уйдут из дерева: иначе их примут за вкладки следующей.
                 let _ = toggle.Collapse();
+                let deadline = std::time::Instant::now() + GROUP_EXPAND_WAIT;
+                while tabs_strip.FindAll(TreeScope_Children, &tab)?.Length()? > seen
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(GROUP_POLL);
+                }
             }
         }
         Ok(None)
+    }
+}
+
+/// Ждёт, пока раскрытая группа покажет свои вкладки, и ищет среди них.
+/// Группа считается раскрытой, когда вкладок стало больше, чем было, и их
+/// число не меняется между двумя проверками.
+fn search_expanded(
+    strip: &IUIAutomationElement,
+    tab: &IUIAutomationCondition,
+    matches: &dyn Fn(&str) -> bool,
+    seen: i32,
+) -> windows::core::Result<Option<String>> {
+    let deadline = std::time::Instant::now() + GROUP_EXPAND_WAIT;
+    let mut last = None;
+    loop {
+        let (hit, count) = find_tab(strip, tab, matches)?;
+        if hit.is_some() {
+            return Ok(hit);
+        }
+        if count > seen && last == Some(count) {
+            return Ok(None);
+        }
+        last = (count > seen).then_some(count);
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(GROUP_POLL);
     }
 }
 
@@ -265,9 +293,60 @@ fn is_foreground(hwnd: RawHwnd) -> bool {
     unsafe { GetForegroundWindow() == hwnd }
 }
 
+/// Вывести вперёд главное окно запущенной программы (по имени файла
+/// процесса, `firefox.exe`). `false` — программа не запущена или её окна не
+/// видно (свёрнута в трей) — тогда её стоит запустить: она покажет себя сама.
+pub fn focus_app(name: &str) -> Result<bool, String> {
+    let pids = process_ids(name)?;
+    if pids.is_empty() {
+        return Ok(false);
+    }
+    let mut windows: Vec<RawHwnd> = Vec::new();
+    // SAFETY: колбэк получает указатель на `windows`, живой до конца EnumWindows.
+    unsafe {
+        EnumWindows(
+            Some(collect_app_window),
+            &mut windows as *mut Vec<RawHwnd> as LPARAM,
+        );
+    }
+    let main = windows.into_iter().find(|&hwnd| {
+        let mut pid = 0u32;
+        // SAFETY: hwnd — от EnumWindows, `pid` — валидный указатель.
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        pids.contains(&pid)
+    });
+    Ok(main.is_some_and(|hwnd| {
+        bring_to_front(hwnd);
+        true
+    }))
+}
+
+/// Главные окна программ: видимые, без владельца, с заголовком, не панели инструментов.
+unsafe extern "system" fn collect_app_window(hwnd: RawHwnd, lparam: LPARAM) -> BOOL {
+    // SAFETY: `lparam` — указатель на Vec из `focus_app`, живой на время EnumWindows.
+    let found = unsafe { &mut *(lparam as *mut Vec<RawHwnd>) };
+    // SAFETY: hwnd — от EnumWindows; функции только читают свойства окна.
+    let main = unsafe {
+        IsWindowVisible(hwnd) != 0
+            && GetWindow(hwnd, GW_OWNER).is_null()
+            && GetWindowTextLengthW(hwnd) > 0
+            && (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW) == 0
+    };
+    if main {
+        found.push(hwnd);
+    }
+    1
+}
+
 /// Запущен ли процесс с таким именем файла (`steam.exe`), без учёта регистра.
 pub fn process_running(name: &str) -> Result<bool, String> {
+    Ok(!process_ids(name)?.is_empty())
+}
+
+/// Номера процессов с таким именем файла, без учёта регистра.
+fn process_ids(name: &str) -> Result<Vec<u32>, String> {
     let wanted = name.trim().to_lowercase();
+    let mut ids = Vec::new();
     // SAFETY: снимок списка процессов; дескриптор закрывает OwnedHandle.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
@@ -287,12 +366,12 @@ pub fn process_running(name: &str) -> Result<bool, String> {
             .position(|&c| c == 0)
             .unwrap_or(entry.szExeFile.len());
         if String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase() == wanted {
-            return Ok(true);
+            ids.push(entry.th32ProcessID);
         }
         // SAFETY: то же, что для Process32FirstW.
         more = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;
     }
-    Ok(false)
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -305,6 +384,11 @@ mod tests {
         let name = exe.file_name().unwrap().to_string_lossy().to_uppercase();
         assert!(process_running(&name).unwrap(), "{name}");
         assert!(!process_running("нет-такой-программы-jarvis.exe").unwrap());
+    }
+
+    #[test]
+    fn focus_of_missing_app_is_false() {
+        assert!(!focus_app("нет-такой-программы-jarvis.exe").unwrap());
     }
 
     #[test]

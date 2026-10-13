@@ -22,16 +22,18 @@ reply = "ok"
 [command.action]
 type = "open_url"
 url = "https://www.google.com"
-find_tab = ["Google", "* - Поиск в Google", "* - Google Search"]
+# Только пустая страница Google — вкладки с результатами поиска не подходят.
+find_tab = ["Google"]
 
 [[command]]
 id = "open_browser"
 phrases = ["открой браузер", "запусти браузер", "открой файрфокс", "запусти файрфокс"]
-description = "запустит браузер Firefox"
+description = "выведет вперёд окно Firefox, а если он закрыт — запустит"
 reply = "ok"
 [command.action]
 type = "launch_app"
 path = 'C:\Program Files\Mozilla Firefox\firefox.exe'
+focus = "firefox.exe"
 
 [[command]]
 id = "open_calendar"
@@ -42,3 +44,15 @@ reply = "ok"
 type = "open_url"
 url = "https://calendar.google.com"
 find_tab = ["Google Календарь*", "Google Calendar*"]
+
+[[command]]
+id = "open_music"
+# Без «открой ютуб …»: Джарвис выполняет команду по точному началу фразы,
+# и «открой ютуб» сработало бы раньше, чем прозвучит «музыку».
+phrases = ["открой музыку", "запусти музыку", "открой мьюзик"]
+description = "откроет YouTube Music в браузере"
+reply = "ok"
+[command.action]
+type = "open_url"
+url = "https://music.youtube.com/"
+find_tab = ["YouTube Music", "* - YouTube Music"]

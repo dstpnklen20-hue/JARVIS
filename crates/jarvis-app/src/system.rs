@@ -77,6 +77,10 @@ impl System for PlatformSystem {
         jarvis_platform::activate_browser_tab(matches)
     }
 
+    fn focus_app(&self, name: &str) -> Result<bool, String> {
+        jarvis_platform::focus_app(name)
+    }
+
     fn focus_browser(&self) -> bool {
         jarvis_platform::focus_browser()
     }

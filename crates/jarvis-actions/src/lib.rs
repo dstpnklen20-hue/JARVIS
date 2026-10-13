@@ -105,6 +105,9 @@ pub trait System: Send + Sync {
     /// Найти открытую вкладку браузера, заголовок которой подходит, сделать её
     /// текущей и вывести окно вперёд. `Ok(None)` — такой вкладки нет.
     fn activate_tab(&self, matches: &dyn Fn(&str) -> bool) -> Result<Option<String>, String>;
+    /// Вывести вперёд главное окно запущенной программы (по имени процесса);
+    /// `false` — не запущена или окна не видно.
+    fn focus_app(&self, name: &str) -> Result<bool, String>;
     /// Вывести окно браузера вперёд (после открытия новой вкладки);
     /// `false` — браузер не найден или Windows не дала сменить окно.
     fn focus_browser(&self) -> bool;
@@ -254,7 +257,18 @@ pub fn execute(action: &ActionSpec, ctx: &Context<'_>) -> Result<Outcome, Action
             path,
             args,
             working_dir,
+            focus,
         } => {
+            if let Some(name) = focus {
+                match ctx.system.focus_app(name) {
+                    Ok(true) => {
+                        tracing::info!(%name, "программа уже открыта — вывожу окно вперёд");
+                        return Ok(Outcome::Done);
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(error = %e, "не удалось поискать окно программы"),
+                }
+            }
             let spec = ProcessSpec {
                 program: app_path(ctx.dir, path),
                 args: args.clone(),
@@ -428,6 +442,8 @@ mod tests {
         tabs: Vec<String>,
         /// Через сколько проверок процесс «запустится» (`None` — никогда).
         process_after: Option<usize>,
+        /// Программы с открытым окном (для `focus`).
+        running: Vec<String>,
         checks: Mutex<usize>,
     }
 
@@ -486,6 +502,10 @@ mod tests {
         fn focus_browser(&self) -> bool {
             let _ = self.log("focus browser".into());
             true
+        }
+        fn focus_app(&self, name: &str) -> Result<bool, String> {
+            self.log(format!("focus {name}"))?;
+            Ok(self.running.iter().any(|r| r.eq_ignore_ascii_case(name)))
         }
         fn process_running(&self, name: &str) -> Result<bool, String> {
             let mut checks = self.checks.lock().unwrap();
@@ -587,6 +607,7 @@ mod tests {
             path: path.into(),
             args: vec!["a.txt".into()],
             working_dir: None,
+            focus: None,
         };
         run(&launch("notepad.exe"), &fake).unwrap();
         run(&launch("bin\\tool.exe"), &fake).unwrap();
@@ -878,6 +899,7 @@ mod tests {
                     path: "steam.exe".into(),
                     args: vec![],
                     working_dir: None,
+                    focus: None,
                 },
                 ActionSpec::Ask {
                     file: "ask.wav".into(),
@@ -895,5 +917,28 @@ mod tests {
             }))
         );
         assert_eq!(calls(&fake), ["spawn steam.exe []"]);
+    }
+
+    #[test]
+    fn launch_with_focus_brings_running_app_forward() {
+        let firefox = ActionSpec::LaunchApp {
+            path: "C:\\Firefox\\firefox.exe".into(),
+            args: vec![],
+            working_dir: None,
+            focus: Some("firefox.exe".into()),
+        };
+        let open = Fake {
+            running: vec!["Firefox.exe".into()],
+            ..Fake::default()
+        };
+        assert_eq!(run(&firefox, &open), Ok(Outcome::Done));
+        assert_eq!(calls(&open), ["focus firefox.exe"]);
+
+        let closed = Fake::default();
+        assert_eq!(run(&firefox, &closed), Ok(Outcome::Done));
+        assert_eq!(
+            calls(&closed),
+            ["focus firefox.exe", "spawn C:\\Firefox\\firefox.exe []"]
+        );
     }
 }

@@ -57,3 +57,12 @@ reply = "none"
 [command.action]
 type = "hotkey"
 keys = ["win", "shift", "s"]
+
+[[command]]
+id = "system_settings"
+phrases = ["открой параметры", "запусти параметры", "открой настройки", "открой параметры windows"]
+description = "откроет Параметры Windows (Win+I)"
+reply = "ok"
+[command.action]
+type = "hotkey"
+keys = ["win", "i"]

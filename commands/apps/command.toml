@@ -50,3 +50,4 @@ reply = "ok"
 type = "launch_app"
 path = "explorer.exe"
 args = ['shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude']
+focus = "claude.exe"
