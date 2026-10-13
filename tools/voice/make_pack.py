@@ -34,7 +34,7 @@ OUT = ROOT / "tools" / "voice" / "out"
 PACK = ROOT / "sounds" / "jarvis"
 # Раунд 3 — новые фразы (not_heard, out_of_range, команды); файла может не быть.
 RATINGS = [ROOT / "data" / "оценки_раунд2.txt", ROOT / "data" / "оценки_раунд3.txt"]
-REPLIES = ("wake", "ok", "not_understood", "failed", "ask", "denied", "not_heard", "out_of_range")
+REPLIES = ("wake", "ok", "not_understood", "failed", "ask", "denied", "not_heard", "out_of_range", "thinking", "offline")
 # Фраза, которая по смыслу относится к другому ответу, чем говорит её id:
 # «Простите, сэр, я не расслышал» — ответ на тишину после «Джарвис».
 GROUP_OF = {"not_understood_1": "not_heard"}
