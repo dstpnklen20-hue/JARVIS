@@ -46,8 +46,9 @@ pub trait LanguageModel: Send + Sync {
 pub enum LlmError {
     #[error("ключ API не сохранён")]
     NoKey,
-    #[error("сервер не принял ключ API")]
-    BadKey,
+    /// `message` — ответ сервера (без ключа): посредники объясняют там причину.
+    #[error("сервер не принял ключ API ({status}: {message})")]
+    BadKey { status: u16, message: String },
     #[error("нет связи с сервером")]
     Offline(#[source] reqwest::Error),
     #[error("сервер не ответил вовремя")]

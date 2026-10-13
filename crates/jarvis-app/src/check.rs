@@ -340,7 +340,16 @@ fn check_llm(config: &Config) -> Item {
         (true, Ok(Some(_))) => Item::new(
             Status::Ok,
             TITLE,
-            format!("{}, усилие {}; {key_text}", llm.model, llm.effort),
+            format!(
+                "{}, усилие {}, {}; {key_text}",
+                llm.model,
+                llm.effort,
+                if llm.server.is_empty() {
+                    "напрямую в Anthropic".to_owned()
+                } else {
+                    format!("через {}", llm.server)
+                }
+            ),
         ),
         (true, _) => Item::new(Status::Warn, TITLE, format!("включена, но {key_text}")),
     }

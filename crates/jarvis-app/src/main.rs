@@ -232,10 +232,17 @@ fn set_api_key() -> ExitCode {
         }
     };
     if !jarvis_llm::secrets::looks_like_key(&key) {
-        eprintln!(
-            "Это не похоже на ключ Anthropic (должен начинаться с sk-ant-). Ничего не сохранено."
+        if !jarvis_llm::secrets::looks_like_server_key(&key) {
+            eprintln!(
+                "Это не похоже на ключ (только латиница, цифры и знаки, без пробелов). \
+                 Ничего не сохранено."
+            );
+            return ExitCode::FAILURE;
+        }
+        println!(
+            "Это ключ не Anthropic (у них начало sk-ant-), а сервера-посредника: \
+             укажите его адрес в config\\user.toml — [llm] server = \"https://…\"."
         );
-        return ExitCode::FAILURE;
     }
     match jarvis_llm::secrets::save_api_key(&key) {
         Ok(()) => {

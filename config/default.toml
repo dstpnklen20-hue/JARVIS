@@ -119,6 +119,13 @@ min_words = 2
 show_window = true
 # Через сколько секунд после ответа окно закрывается само (3–300).
 window_secs = 20
+# Сервер-посредник вместо Anthropic (то, что у Claude Code задаётся в
+# ANTHROPIC_BASE_URL), например "https://api.example.com"; пусто — напрямую.
+# Посредник видит все вопросы и ответы.
+server = ""
+# Как передавать ключ: api_key (как ANTHROPIC_API_KEY) или bearer (как
+# ANTHROPIC_AUTH_TOKEN).
+auth = "api_key"
 
 [logging]
 # Уровень: trace, debug, info, warn, error.

@@ -34,7 +34,7 @@ use jarvis_core::journal::{self, ActionJournal, AnswerSource, Entry, PermissionN
 use jarvis_core::permissions::{Answer, PermissionStore, Verdict};
 use jarvis_core::slots::SlotValues;
 use jarvis_core::state::{Effect, Event, Reply, State, Timings, transition};
-use jarvis_llm::claude::{ClaudeClient, ClaudeSettings};
+use jarvis_llm::claude::{ClaudeClient, ClaudeSettings, messages_url};
 use jarvis_llm::conversation::ToolOutcome;
 use jarvis_llm::tools::CommandRequest;
 use jarvis_llm::{LanguageModel, LlmError};
@@ -1767,14 +1767,16 @@ fn spawn_brain(config: &Config, registry: &Registry, events: Sender<CoreMsg>) ->
         max_tokens: llm.max_tokens,
         thinking: llm.thinking.clone(),
         fallback: llm.fallback,
+        bearer: llm.auth == "bearer",
     };
+    let url = messages_url(&llm.server);
     let factory: ModelFactory = Box::new(move || {
         let key = jarvis_llm::secrets::api_key()?.ok_or(LlmError::NoKey)?;
-        let client = ClaudeClient::new(key, settings.clone())?;
+        let client = ClaudeClient::with_url(key, settings.clone(), url.clone())?;
         Ok(Box::new(client) as Box<dyn LanguageModel>)
     });
     let memory = Duration::from_secs(u64::from(llm.memory_mins) * 60);
-    tracing::info!(model = %llm.model, effort = %llm.effort, "нейросеть включена");
+    tracing::info!(model = %llm.model, effort = %llm.effort, server = %llm.server, "нейросеть включена");
     Brain::spawn(
         factory,
         tool_commands(registry),

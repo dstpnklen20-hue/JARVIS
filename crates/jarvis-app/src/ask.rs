@@ -20,7 +20,7 @@ use jarvis_audio::tts::{PiperTts, TextToSpeech};
 use jarvis_core::Config;
 use jarvis_core::commands::Registry;
 use jarvis_core::config::resolve;
-use jarvis_llm::claude::{API_URL, ClaudeClient, ClaudeSettings};
+use jarvis_llm::claude::{ClaudeClient, ClaudeSettings, messages_url};
 use jarvis_llm::{LanguageModel, LlmError};
 
 pub fn run(root: &Path, config: &Config, question: &str) -> anyhow::Result<()> {
@@ -31,8 +31,9 @@ pub fn run(root: &Path, config: &Config, question: &str) -> anyhow::Result<()> {
         max_tokens: llm.max_tokens,
         thinking: llm.thinking.clone(),
         fallback: llm.fallback,
+        bearer: llm.auth == "bearer",
     };
-    let url = std::env::var("JARVIS_LLM_URL").unwrap_or_else(|_| API_URL.to_owned());
+    let url = std::env::var("JARVIS_LLM_URL").unwrap_or_else(|_| messages_url(&llm.server));
     let factory: ModelFactory = Box::new(move || {
         let key = match std::env::var("JARVIS_LLM_URL") {
             // Поддельный сервер в тестах — настоящий ключ ему не нужен.

@@ -248,7 +248,7 @@ fn worker(
                     }
                     Err(e) => {
                         tracing::error!(error = %jarvis_core::error_chain(&e), "нейросеть не ответила");
-                        if matches!(e, LlmError::BadKey) {
+                        if matches!(e, LlmError::BadKey { .. }) {
                             model = None; // ключ перечитается при следующем вопросе
                         }
                         events(BrainEvent::Failed {
@@ -265,7 +265,7 @@ fn worker(
 fn failure(e: &LlmError) -> Failure {
     match e {
         LlmError::NoKey => Failure::NoKey,
-        LlmError::BadKey => Failure::BadKey,
+        LlmError::BadKey { .. } => Failure::BadKey,
         LlmError::Busy => Failure::Busy,
         e if e.is_offline() => Failure::Offline,
         e => Failure::Other(jarvis_core::error_chain(e)),

@@ -234,6 +234,21 @@ Claude (Anthropic). Ответ звучит **по предложениям по
 сэр»; прервать длинный ответ — Ctrl+Alt+F12 или «Пауза» в трее (голосом «стоп» во время ответа не
 сработает: пока Джарвис говорит, микрофон заглушён).
 
+**Ключ от посредника** (не `sk-ant-…`, а ключ продавца «для Claude Code / CLI»): в его инструкции
+есть `ANTHROPIC_BASE_URL` (адрес) и `ANTHROPIC_AUTH_TOKEN` или `ANTHROPIC_API_KEY` (ключ). Ключ —
+так же через `jarvis --set-api-key`, адрес — в `config/user.toml`:
+
+```toml
+[llm]
+enabled = true
+server = "https://адрес-из-ANTHROPIC_BASE_URL"
+auth = "bearer"            # если в инструкции ANTHROPIC_AUTH_TOKEN; ANTHROPIC_API_KEY — "api_key"
+model = "claude-sonnet-5"  # какую модель открыл продавец
+```
+
+Ответ «403: This model is not enabled for the API key» — модель не открыта для ключа: поменяйте
+`model`. Посредник видит все вопросы и ответы и может в любой момент перестать работать.
+
 ## Как пользоваться
 
 - «Джарвис» → «Да, сэр» → команда: «открой ютуб».

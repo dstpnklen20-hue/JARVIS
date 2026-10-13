@@ -19,6 +19,7 @@ fn settings() -> ClaudeSettings {
         max_tokens: 512,
         thinking: "adaptive".into(),
         fallback: true,
+        bearer: false,
     }
 }
 
@@ -103,6 +104,37 @@ fn streams_answer_over_http_with_headers() {
 }
 
 #[test]
+fn server_key_goes_as_bearer_token() {
+    let (url, request) = serve_once(
+        "200 OK",
+        "text/event-stream",
+        include_str!("fixtures/text_answer.sse"),
+    );
+    let bearer = ClaudeSettings {
+        bearer: true,
+        ..settings()
+    };
+    let client = ClaudeClient::with_url("sk-cvc-test-key".into(), bearer, url).unwrap();
+    client
+        .respond(
+            &Request {
+                system: "x",
+                tools: &[],
+                messages: &[json!({"role": "user", "content": "привет"})],
+            },
+            &AtomicBool::new(false),
+            &mut |_| {},
+        )
+        .unwrap();
+    let lower = request.recv().unwrap().to_ascii_lowercase();
+    assert!(
+        lower.contains("authorization: bearer sk-cvc-test-key"),
+        "{lower}"
+    );
+    assert!(!lower.contains("x-api-key"));
+}
+
+#[test]
 fn rejected_key_is_reported() {
     // Получатель держим до конца: иначе сервер не сможет отчитаться и не ответит.
     let (url, _request) = serve_once(
@@ -122,7 +154,10 @@ fn rejected_key_is_reported() {
             &mut |_| {},
         )
         .unwrap_err();
-    assert!(matches!(err, LlmError::BadKey), "{err:?}");
+    assert!(
+        matches!(err, LlmError::BadKey { status: 401, ref message } if message == "invalid x-api-key"),
+        "{err:?}"
+    );
 }
 
 #[test]

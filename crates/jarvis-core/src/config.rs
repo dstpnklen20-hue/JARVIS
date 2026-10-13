@@ -212,10 +212,16 @@ pub struct Llm {
     pub show_window: bool,
     /// Через сколько секунд после ответа окно закрывается само.
     pub window_secs: u32,
+    /// Сервер-посредник (`https://…`) вместо Anthropic; пусто — напрямую.
+    pub server: String,
+    /// Как передавать ключ: `api_key` (заголовок x-api-key) или `bearer`
+    /// (Authorization: Bearer — как ANTHROPIC_AUTH_TOKEN у Claude Code).
+    pub auth: String,
 }
 
 pub const LLM_EFFORTS: [&str; 3] = ["low", "medium", "high"];
 pub const LLM_THINKING: [&str; 2] = ["adaptive", "between_tools"];
+pub const LLM_AUTH: [&str; 2] = ["api_key", "bearer"];
 pub const LLM_MAX_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 256..=8192;
 pub const LLM_MEMORY_MINS_RANGE: std::ops::RangeInclusive<u32> = 1..=60;
 pub const LLM_MIN_WORDS_RANGE: std::ops::RangeInclusive<u32> = 1..=10;
@@ -498,6 +504,22 @@ impl Config {
             LLM_WINDOW_SECS_RANGE.contains(&self.llm.window_secs),
             "llm.window_secs",
             out_of_range(self.llm.window_secs, &LLM_WINDOW_SECS_RANGE),
+        );
+        check(
+            self.llm.server.is_empty()
+                || (self.llm.server.starts_with("https://")
+                    && self.llm.server.len() > "https://".len()
+                    && !self.llm.server.contains(char::is_whitespace)),
+            "llm.server",
+            format!(
+                "«{}» — адрес вида https://сервер или пусто (напрямую в Anthropic)",
+                self.llm.server
+            ),
+        );
+        check(
+            LLM_AUTH.contains(&self.llm.auth.as_str()),
+            "llm.auth",
+            format!("«{}» — одно из: {}", self.llm.auth, LLM_AUTH.join(", ")),
         );
         check(
             DIALOG_IDLE_MINS_RANGE.contains(&self.session.dialog_idle_mins),

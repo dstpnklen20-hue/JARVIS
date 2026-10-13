@@ -33,6 +33,18 @@ pub struct ClaudeSettings {
     /// `adaptive` (по умолчанию) или `between_tools` (без раздумий, Sonnet 5.5).
     pub thinking: String,
     pub fallback: bool,
+    /// Ключ в `Authorization: Bearer` вместо `x-api-key` (некоторые посредники).
+    pub bearer: bool,
+}
+
+/// Адрес Messages API: Anthropic или сервер-посредник (`https://сервер`).
+pub fn messages_url(server: &str) -> String {
+    let server = server.trim().trim_end_matches('/');
+    if server.is_empty() {
+        API_URL.to_owned()
+    } else {
+        format!("{server}/v1/messages")
+    }
 }
 
 pub struct ClaudeClient {
@@ -47,7 +59,7 @@ impl ClaudeClient {
         Self::with_url(api_key, settings, API_URL.to_owned())
     }
 
-    /// Другой адрес — для тестов с локальным сервером.
+    /// Другой адрес — сервер-посредник или локальный сервер в тестах.
     pub fn with_url(
         api_key: String,
         settings: ClaudeSettings,
@@ -105,9 +117,13 @@ impl LanguageModel for ClaudeClient {
         let mut call = self
             .http
             .post(&self.url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json");
+        call = if self.settings.bearer {
+            call.bearer_auth(&self.api_key)
+        } else {
+            call.header("x-api-key", &self.api_key)
+        };
         if self.settings.fallback {
             call = call.header("anthropic-beta", FALLBACK_BETA);
         }
@@ -117,7 +133,11 @@ impl LanguageModel for ClaudeClient {
             .map_err(classify)?;
         let status = response.status().as_u16();
         if status != 200 {
-            let text = response.text().unwrap_or_default();
+            // Ответ сервера попадёт в лог — ключ из него вырезается.
+            let text = response
+                .text()
+                .unwrap_or_default()
+                .replace(&self.api_key, "***");
             return Err(api_error(status, &text));
         }
         let mut reader = SseReader::new(BufReader::new(response));
@@ -157,7 +177,7 @@ pub fn api_error(status: u16, body: &str) -> LlmError {
         .map(str::to_owned)
         .unwrap_or_else(|| body.chars().take(300).collect());
     match status {
-        401 | 403 => LlmError::BadKey,
+        401 | 403 => LlmError::BadKey { status, message },
         429 | 529 => LlmError::Busy,
         _ if kind == "overloaded_error" => LlmError::Busy,
         _ => LlmError::Api {
@@ -179,7 +199,17 @@ mod tests {
             max_tokens: 1024,
             thinking: "adaptive".into(),
             fallback: true,
+            bearer: false,
         }
+    }
+
+    #[test]
+    fn messages_url_for_anthropic_and_server() {
+        assert_eq!(messages_url(""), API_URL);
+        assert_eq!(
+            messages_url("https://api.example.com/"),
+            "https://api.example.com/v1/messages"
+        );
     }
 
     #[test]
@@ -221,7 +251,10 @@ mod tests {
 
     #[test]
     fn api_errors_are_classified() {
-        assert!(matches!(api_error(401, "{}"), LlmError::BadKey));
+        assert!(matches!(
+            api_error(401, "{}"),
+            LlmError::BadKey { status: 401, .. }
+        ));
         assert!(matches!(api_error(529, "{}"), LlmError::Busy));
         let e = api_error(
             400,

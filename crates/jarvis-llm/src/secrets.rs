@@ -46,6 +46,13 @@ pub fn looks_like_key(key: &str) -> bool {
     key.starts_with("sk-ant-") && key.len() >= 40 && !key.contains(char::is_whitespace)
 }
 
+/// Ключ сервера-посредника: формат у каждого свой — только латиница, цифры и
+/// знаки, без пробелов, не короче 20 символов.
+pub fn looks_like_server_key(key: &str) -> bool {
+    let key = key.trim();
+    key.len() >= 20 && key.chars().all(|c| c.is_ascii_graphic())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,6 +61,10 @@ mod tests {
     fn key_shape_is_checked() {
         assert!(looks_like_key(&format!("sk-ant-api03-{}", "x".repeat(40))));
         assert!(!looks_like_key("hello"));
+        assert!(!looks_like_key(&format!("sk-cvc-{}", "x".repeat(40))));
+        assert!(looks_like_server_key(&format!("sk-cvc-{}", "x".repeat(40))));
+        assert!(!looks_like_server_key("sk-смс-1234567890123456789"));
+        assert!(!looks_like_server_key("short"));
         assert!(!looks_like_key(&format!("sk-ant- {}", "x".repeat(40))));
     }
 
