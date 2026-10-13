@@ -26,8 +26,9 @@ impl Indicator {
     fn color(&self) -> [u8; 3] {
         match self {
             Indicator::Starting => [0xE0, 0xA0, 0x20],
-            Indicator::Idle => [0x2E, 0xB8, 0x5C],
-            Indicator::Listening => [0x2F, 0x80, 0xED],
+            // Свой цвет реактора — спокойный голубой; слушает — ярче, почти белый.
+            Indicator::Idle => [0x1E, 0x8C, 0xF0],
+            Indicator::Listening => [0x7F, 0xF4, 0xFF],
             Indicator::Asking => [0x9B, 0x51, 0xE0],
             Indicator::Paused => [0x8A, 0x8F, 0x98],
             Indicator::Problem(_) => [0xE0, 0x3E, 0x3E],
@@ -147,27 +148,79 @@ impl Tray {
 }
 
 const SIZE: u32 = 32;
+/// Подвыборок на пиксель по каждой оси — сглаживание краёв.
+const SUPERSAMPLE: u32 = 4;
+/// Тёмных сегментов на внешнем кольце реактора.
+const SEGMENTS: f32 = 10.0;
 
-/// Круг с тёмной обводкой и сглаженным краем.
+/// Дуговой реактор: светящееся кольцо с тёмными сегментами, зазор, ядро.
+/// Свечение окрашено в цвет состояния.
 fn render_icon(color: [u8; 3]) -> anyhow::Result<Icon> {
     Icon::from_rgba(icon_pixels(color), SIZE, SIZE).context("не удалось нарисовать значок")
 }
 
-fn icon_pixels([r, g, b]: [u8; 3]) -> Vec<u8> {
+fn icon_pixels(color: [u8; 3]) -> Vec<u8> {
+    let tint = color.map(|v| f32::from(v) / 255.0);
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    let c = (SIZE as f32 - 1.0) / 2.0;
-    let radius = SIZE as f32 / 2.0 - 1.5;
+    let half = SIZE as f32 / 2.0;
+    let step = 1.0 / SUPERSAMPLE as f32;
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            let alpha = (radius + 0.5 - d).clamp(0.0, 1.0);
-            // Обводка: последние 2.5 px темнее.
-            let shade = if d > radius - 2.5 { 0.6 } else { 1.0 };
-            let px = |v: u8| (f32::from(v) * shade) as u8;
-            rgba.extend_from_slice(&[px(r), px(g), px(b), (alpha * 255.0) as u8]);
+            // Среднее по подвыборкам с предумноженной прозрачностью.
+            let mut sum = [0.0f32; 4];
+            for sy in 0..SUPERSAMPLE {
+                for sx in 0..SUPERSAMPLE {
+                    let px = x as f32 + (sx as f32 + 0.5) * step;
+                    let py = y as f32 + (sy as f32 + 0.5) * step;
+                    if let Some(rgb) = reactor((px - half) / half, (py - half) / half, tint) {
+                        for (s, v) in sum.iter_mut().zip(rgb) {
+                            *s += v;
+                        }
+                        sum[3] += 1.0;
+                    }
+                }
+            }
+            let n = (SUPERSAMPLE * SUPERSAMPLE) as f32;
+            let alpha = sum[3] / n;
+            let channel = |v: f32| {
+                if sum[3] > 0.0 {
+                    (v / sum[3] * 255.0).round().clamp(0.0, 255.0) as u8
+                } else {
+                    0
+                }
+            };
+            rgba.extend_from_slice(&[
+                channel(sum[0]),
+                channel(sum[1]),
+                channel(sum[2]),
+                (alpha * 255.0).round() as u8,
+            ]);
         }
     }
     rgba
+}
+
+/// Цвет реактора в точке (`x`, `y` от −1 до 1, центр — 0); `None` — снаружи.
+fn reactor(x: f32, y: f32, tint: [f32; 3]) -> Option<[f32; 3]> {
+    let r = (x * x + y * y).sqrt();
+    let dark = |k: f32| tint.map(|c| c * k);
+    let light = |k: f32| tint.map(|c| c + (1.0 - c) * k);
+    // Сегменты: 10 штук, один сверху, занимают 45 % окружности; лежат внутри
+    // светящегося кольца — свечение обрамляет их с обеих сторон.
+    let turn = (x.atan2(-y) / std::f32::consts::TAU * SEGMENTS + 0.5).rem_euclid(1.0);
+    let segment = (turn - 0.5).abs() < 0.225;
+    let rgb = match r {
+        r if r > 1.0 => return None,
+        // Тонкий тёмный обод — значок читается и на светлой панели задач.
+        r if r > 0.94 => dark(0.35),
+        r if r > 0.66 && r < 0.87 && segment => dark(0.22),
+        r if r > 0.58 => light(0.3),
+        r if r > 0.47 => dark(0.18),
+        r if r > 0.36 => light(0.15),
+        r if r > 0.27 => dark(0.45),
+        _ => light(0.8),
+    };
+    Some(rgb)
 }
 
 #[cfg(test)]
@@ -180,7 +233,22 @@ mod tests {
         assert_eq!(px.len(), (SIZE * SIZE * 4) as usize);
         let at = |x: u32, y: u32| &px[((y * SIZE + x) * 4) as usize..][..4];
         assert_eq!(at(0, 0)[3], 0);
-        assert_eq!(at(SIZE / 2, SIZE / 2), [10, 200, 30, 255]);
+        // Ядро светлее цвета состояния, но того же оттенка.
+        let core = at(SIZE / 2, SIZE / 2);
+        assert_eq!(core[3], 255);
+        assert!(core[1] > 200 && core[0] > 10 && core[1] > core[0]);
+    }
+
+    #[test]
+    fn reactor_ring_alternates_segments_and_glow() {
+        let tint = [0.1, 0.5, 0.9];
+        let ring = 0.74;
+        // Сверху — тёмный сегмент, между сегментами (18° в сторону) — свечение.
+        let top = reactor(0.0, -ring, tint).unwrap();
+        let gap = std::f32::consts::PI / SEGMENTS;
+        let between = reactor(ring * gap.sin(), -ring * gap.cos(), tint).unwrap();
+        assert!(top[2] < 0.5 && between[2] > 0.9);
+        assert!(reactor(0.8, 0.8, tint).is_none());
     }
 
     #[test]
