@@ -40,7 +40,7 @@ use jarvis_llm::tools::CommandRequest;
 use jarvis_llm::{LanguageModel, LlmError};
 use jarvis_nlu::answers::{PermissionReply, parse_reply};
 use jarvis_nlu::{CommandMatcher, CommandPhrases, MatchResult, Thresholds};
-use jarvis_platform::{DialogButton, DialogHandle, DialogSpec, Waker};
+use jarvis_platform::{DialogButton, DialogHandle, DialogSpec, TextWindow, Waker};
 
 use crate::tray::Indicator;
 
@@ -321,6 +321,9 @@ pub struct Core {
     /// Номер вызова команды нейросети, которая сейчас выполняется: её итог
     /// (из журнала) уходит нейросети.
     llm_tool: RefCell<Option<String>>,
+    /// Окно с вопросом и ответом (`llm.show_window`) и когда его закрыть.
+    text_window: Option<TextWindow>,
+    text_window_close_at: Option<Instant>,
 }
 
 impl Core {
@@ -411,6 +414,8 @@ impl Core {
             llm_follow_up: false,
             llm_commands: VecDeque::new(),
             llm_tool: RefCell::new(None),
+            text_window: None,
+            text_window_close_at: None,
         })
     }
 
@@ -459,6 +464,12 @@ impl Core {
         }
         self.tick_answer(now);
         self.next_llm_command(now);
+        if self.text_window_close_at.is_some_and(|at| now >= at) {
+            self.text_window_close_at = None;
+            if let Some(window) = self.text_window.take() {
+                window.close();
+            }
+        }
         if let Some(running) = &self.executing
             && running.started.elapsed() > running.deadline
         {
@@ -1073,6 +1084,7 @@ impl Core {
         if let Some(speech) = &self.speech {
             speech.prepare();
         }
+        self.show_answer_text(&question, "…");
         self.answer = Some(AnswerTurn {
             generation,
             question,
@@ -1104,7 +1116,11 @@ impl Core {
                     speech.say_sentence(answer.next_sentence, text);
                 }
             }
-            BrainEvent::Text { .. } => {}
+            BrainEvent::Text { generation, text } if current(generation, &self.answer) => {
+                if let Some(question) = self.answer.as_ref().map(|a| a.question.clone()) {
+                    self.show_answer_text(&question, &text);
+                }
+            }
             BrainEvent::Done {
                 generation,
                 commands,
@@ -1119,6 +1135,9 @@ impl Core {
                 failure,
             } if current(generation, &self.answer) => {
                 tracing::warn!(?failure, "нейросеть не ответила");
+                if let Some(question) = self.answer.as_ref().map(|a| a.question.clone()) {
+                    self.show_answer_text(&question, &failure_text(&failure));
+                }
                 self.say_failure(&failure);
                 if let Some(answer) = self.answer.as_mut() {
                     answer.done = true;
@@ -1131,22 +1150,38 @@ impl Core {
 
     /// Что сказать, если ответа нет.
     fn say_failure(&mut self, failure: &Failure) {
-        let text = match failure {
-            Failure::Offline => {
-                self.play_in_answer(Reply::Offline);
-                return;
+        match failure {
+            Failure::Offline => self.play_in_answer(Reply::Offline),
+            Failure::Other(_) => self.play_in_answer(Reply::Failed),
+            _ => {
+                if !self.speak(failure_text(failure), Purpose::Notice) {
+                    self.play_in_answer(Reply::Failed);
+                }
             }
-            Failure::NoKey => "Сэр, ключ доступа к нейросети не настроен.",
-            Failure::BadKey => "Сэр, сервер не принял ключ доступа к нейросети.",
-            Failure::Busy => "Сервер нейросети перегружен, сэр. Попробуйте чуть позже.",
-            Failure::Refused => "Боюсь, на это я не отвечу, сэр.",
-            Failure::Other(_) => {
-                self.play_in_answer(Reply::Failed);
-                return;
-            }
-        };
-        if !self.speak(text.to_owned(), Purpose::Notice) {
-            self.play_in_answer(Reply::Failed);
+        }
+    }
+
+    /// Показать (или обновить) окно с вопросом и ответом.
+    fn show_answer_text(&mut self, question: &str, answer: &str) {
+        if !self.config.llm.show_window {
+            return;
+        }
+        let text = format!("Вы: {question}\n\nДжарвис: {answer}");
+        self.text_window_close_at = None;
+        match &self.text_window {
+            Some(window) if window.is_open() => window.set_text(&text),
+            _ => match jarvis_platform::show_text_window("Джарвис", &text) {
+                Ok(window) => self.text_window = Some(window),
+                Err(e) => tracing::warn!(error = %e, "окно ответа не открылось"),
+            },
+        }
+    }
+
+    /// Окно ответа закроется само через `llm.window_secs`.
+    fn close_answer_text_later(&mut self) {
+        if self.text_window.is_some() {
+            self.text_window_close_at =
+                Some(Instant::now() + Duration::from_secs(u64::from(self.config.llm.window_secs)));
         }
     }
 
@@ -1219,6 +1254,7 @@ impl Core {
         };
         let error = answer.failure.as_ref().map(|f| format!("{f:?}"));
         self.journal_answer(&answer, error);
+        self.close_answer_text_later();
         if answer.failure.is_none() {
             self.llm_follow_up = true;
             self.llm_commands.extend(answer.commands);
@@ -1658,6 +1694,9 @@ impl Core {
                     if let Some(answer) = self.answer.take() {
                         self.journal_answer(&answer, Some("аварийная остановка".into()));
                     }
+                    if let Some(window) = self.text_window.take() {
+                        window.close();
+                    }
                     self.llm_commands.clear();
                 }
             }
@@ -1701,6 +1740,18 @@ impl Core {
         if self.ui.send(indicator).is_ok() {
             self.waker.wake();
         }
+    }
+}
+
+/// Что сказать и показать, если нейросеть не ответила.
+fn failure_text(failure: &Failure) -> String {
+    match failure {
+        Failure::NoKey => "Сэр, ключ доступа к нейросети не настроен.".into(),
+        Failure::BadKey => "Сэр, сервер не принял ключ доступа к нейросети.".into(),
+        Failure::Busy => "Сервер нейросети перегружен, сэр. Попробуйте чуть позже.".into(),
+        Failure::Refused => "Боюсь, на это я не отвечу, сэр.".into(),
+        Failure::Offline => "Нет связи с сервером, сэр.".into(),
+        Failure::Other(why) => format!("Не удалось, сэр ({why})."),
     }
 }
 

@@ -28,6 +28,10 @@ pub use windows::{HotkeyGuard, parse_hotkey, register_hotkey};
 #[cfg(windows)]
 pub use windows::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 
+/// Окно с текстом ответа нейросети.
+#[cfg(windows)]
+pub use windows::{TextWindow, show_text_window};
+
 /// Системные действия команд: адреса, мультимедиа, процессы, клавиши, питание, громкость.
 #[cfg(windows)]
 pub use windows::{
@@ -216,5 +220,29 @@ mod tests {
         .unwrap();
         // Пробуждение вызвало обработчик, quit завершил цикл.
         assert!(ticks >= 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "на 3 секунды показывает окно в углу экрана"]
+    fn text_window_shows_updates_and_closes() {
+        let window = show_text_window(
+            "Джарвис — ответ",
+            "Вы: кто такой Тони Старк?
+
+Джарвис: Тони",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        assert!(window.is_open());
+        window.set_text(
+            "Вы: кто такой Тони Старк?
+
+Джарвис: Тони Старк — гениальный изобретатель и глава              Stark Industries, сэр. Он же — Железный человек.",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        window.close();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!window.is_open());
     }
 }

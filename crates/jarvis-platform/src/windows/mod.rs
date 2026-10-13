@@ -11,6 +11,7 @@ mod power;
 mod process;
 mod stop;
 mod system;
+mod text_window;
 
 pub use actions::{MediaKey, media_key, open_url};
 pub use browser::{activate_browser_tab, focus_app, focus_browser, process_running};
@@ -26,6 +27,7 @@ pub use power::{Power, power, set_volume};
 pub use process::{RunEnd, run_and_wait, spawn_detached};
 pub use stop::{StopSignal, create_stop_signal, send_stop_signal};
 pub use system::{is_elevated, os_info};
+pub use text_window::{TextWindow, show_text_window};
 
 fn last_error(call: &'static str) -> crate::PlatformError {
     crate::PlatformError::Win32 {
