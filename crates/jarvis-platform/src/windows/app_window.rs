@@ -27,7 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateIcon, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow,
     GWLP_USERDATA, GetWindowLongPtrW, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, IsIconic, IsWindow,
     LoadCursorW, MINMAXINFO, RegisterClassExW, SPI_GETWORKAREA, SW_RESTORE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, SystemParametersInfoW, WM_CLOSE, WM_DPICHANGED, WM_GETMINMAXINFO,
     WM_NCCREATE, WM_NCDESTROY, WM_SETICON, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
@@ -160,6 +160,19 @@ impl AppWindow {
     /// Окно не закрыли крестиком.
     pub fn is_open(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
+    }
+
+    /// Таймер окна: каждые `ms` миллисекунд цикл сообщений просыпается (для
+    /// анимации). Останавливается вместе с окном.
+    pub fn set_tick(&self, ms: u32) {
+        if !self.is_open() {
+            return;
+        }
+        // SAFETY: окно этого потока; таймер без процедуры приходит как
+        // WM_TIMER в цикл сообщений, окно его не обрабатывает.
+        unsafe {
+            SetTimer(self.hwnd, 1, ms.max(10), None);
+        }
     }
 
     /// Развернуть, если свёрнуто, и вывести вперёд.

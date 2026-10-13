@@ -292,6 +292,8 @@ where
                         Command::Stop => None,
                     };
                 }
+                let mut energy = 0.0f32;
+                let mut frames = 0usize;
                 for frame in out.chunks_exact_mut(channels) {
                     let value = match current.as_mut() {
                         Some((samples, pos, gain)) if *pos < samples.len() => {
@@ -301,8 +303,14 @@ where
                         }
                         _ => 0.0,
                     };
+                    energy += value * value;
+                    frames += 1;
                     let sample = T::from_sample_(value);
                     frame.iter_mut().for_each(|s| *s = sample);
+                }
+                // Громкость для реактора в окне — одна атомарная запись.
+                if frames > 0 {
+                    crate::level::OUTPUT.set_rms((energy / frames as f32).sqrt());
                 }
                 if matches!(&current, Some((samples, pos, _)) if *pos >= samples.len()) {
                     current = None;

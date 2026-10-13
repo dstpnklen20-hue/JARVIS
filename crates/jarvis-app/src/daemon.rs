@@ -265,8 +265,16 @@ pub fn run(root: &Path, config: Config, restart: bool) -> anyhow::Result<()> {
                     },
                 }
             }
-            if let Some(resources) = model.resources_due(Instant::now()) {
+            let now = Instant::now();
+            if let Some(resources) = model.resources_due(now) {
                 w.update(&resources);
+            }
+            let (mic, output) = (
+                jarvis_audio::level::MIC.get(),
+                jarvis_audio::level::OUTPUT.get(),
+            );
+            if let Some(level) = model.level_due(now, mic, output) {
+                w.update(&level);
             }
         }
         let action = match tray.poll_menu() {

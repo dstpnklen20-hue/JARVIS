@@ -437,6 +437,7 @@ impl Worker<'_> {
         if self.gate.is_muted() {
             self.resampled.iter_mut().for_each(|s| *s = 0.0);
         }
+        crate::level::MIC.set_rms(crate::level::rms(&self.resampled));
         let cap = MODEL_RATE as usize * HISTORY_SECS;
         self.history.extend(self.resampled.iter().copied());
         if self.history.len() > cap {

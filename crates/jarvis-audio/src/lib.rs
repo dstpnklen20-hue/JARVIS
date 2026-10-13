@@ -9,6 +9,7 @@ pub mod bpe;
 pub mod capture;
 pub mod engines;
 mod error;
+pub mod level;
 pub mod models;
 pub mod pack;
 pub mod pipeline;

@@ -29,6 +29,8 @@ const PAGE: &str = include_str!("../ui/index.html");
 const BACKGROUND: u32 = 0x05_09_0E;
 /// Как часто обновлять «Ресурсы», пока окно открыто.
 const RESOURCES_EVERY: Duration = Duration::from_secs(2);
+/// Громкость для реактора — ~30 раз в секунду.
+const LEVEL_EVERY: Duration = Duration::from_millis(33);
 
 /// Сообщение страницы.
 #[derive(Deserialize)]
@@ -107,6 +109,7 @@ impl MainWindow {
             })
             .build(&window)
             .context("WebView2 не запустился (нужна среда Microsoft Edge WebView2)")?;
+        window.set_tick(LEVEL_EVERY.as_millis() as u32);
         Ok(Self {
             webview,
             window,
@@ -160,6 +163,8 @@ pub struct WindowModel {
     pub mic: Option<String>,
     usage: Option<(Instant, Duration)>,
     usage_due: Instant,
+    level_sent: f32,
+    level_due: Instant,
 }
 
 impl Default for WindowModel {
@@ -170,6 +175,8 @@ impl Default for WindowModel {
             mic: None,
             usage: None,
             usage_due: Instant::now(),
+            level_sent: 0.0,
+            level_due: Instant::now(),
         }
     }
 }
@@ -196,6 +203,27 @@ impl WindowModel {
             "problem": problem_text(&self.indicator),
             "status": { "mic": self.mic_status() },
         })
+    }
+
+    /// Громкость для реактора, если пора и она изменилась: голос Джарвиса
+    /// всегда, микрофон — только когда Джарвис слушает команду (иначе реактор
+    /// дёргался бы от телевизора).
+    pub fn level_due(&mut self, now: Instant, mic: f32, output: f32) -> Option<Value> {
+        if now < self.level_due {
+            return None;
+        }
+        self.level_due = now + LEVEL_EVERY;
+        let mic = if self.indicator == Indicator::Listening {
+            mic
+        } else {
+            0.0
+        };
+        let level = mic.max(output);
+        if (level - self.level_sent).abs() < 0.02 {
+            return None;
+        }
+        self.level_sent = level;
+        Some(json!({ "level": (f64::from(level) * 100.0).round() / 100.0 }))
     }
 
     /// «Ресурсы», если пора обновить.
@@ -357,6 +385,29 @@ mod tests {
         let update = model.state_update();
         assert_eq!(update["status"]["mic"]["text"], "Микрофон (ME6S)");
         assert!(update["problem"].is_null());
+    }
+
+    #[test]
+    fn level_follows_voice_and_ignores_mic_when_idle() {
+        let mut model = WindowModel {
+            indicator: Indicator::Idle,
+            ..WindowModel::default()
+        };
+        let t = Instant::now();
+        // Ждёт «Джарвис»: микрофон не в счёт.
+        assert!(model.level_due(t, 0.9, 0.0).is_none());
+        // Джарвис говорит.
+        let t = t + LEVEL_EVERY;
+        assert_eq!(model.level_due(t, 0.0, 0.5).unwrap()["level"], 0.5);
+        // Слишком рано — пропуск.
+        assert!(model.level_due(t, 0.0, 0.1).is_none());
+        // Слушает команду: микрофон в счёт.
+        model.indicator = Indicator::Listening;
+        let t = t + LEVEL_EVERY;
+        assert_eq!(model.level_due(t, 0.8, 0.0).unwrap()["level"], 0.8);
+        // Почти та же громкость — не отправляется.
+        let t = t + LEVEL_EVERY;
+        assert!(model.level_due(t, 0.81, 0.0).is_none());
     }
 
     #[test]
