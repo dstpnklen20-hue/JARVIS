@@ -94,7 +94,7 @@ struct Cli {
     #[arg(long, value_name = "TEXT")]
     say: Option<String>,
 
-    /// Голос для --say вместо voice.tts: dmitri, irina, ruslan, denis.
+    /// Голос для --say вместо voice.tts: dmitri, irina, ruslan, denis или свой (папка models/vits-piper-ru_RU-<имя>).
     #[arg(long, value_name = "NAME", requires = "say")]
     voice: Option<String>,
 
