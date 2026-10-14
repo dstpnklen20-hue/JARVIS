@@ -1,6 +1,7 @@
 //! Реализация для Windows через `windows-sys`.
 
 mod actions;
+mod answer_window;
 mod app_window;
 mod autostart;
 mod browser;
@@ -14,9 +15,9 @@ mod power;
 mod process;
 mod stop;
 mod system;
-mod text_window;
 
 pub use actions::{MediaKey, media_key, open_url};
+pub use answer_window::{AnswerStatus, AnswerView, AnswerWindow, LogoPainter, show_answer_window};
 pub use app_window::{AppWindow, AppWindowSpec, open_app_window, use_per_monitor_dpi};
 pub use autostart::{autostart_command, set_autostart};
 pub use browser::{activate_browser_tab, focus_app, focus_browser, process_running};
@@ -35,7 +36,6 @@ pub use stop::{
     StopSignal, create_show_signal, create_stop_signal, send_show_signal, send_stop_signal,
 };
 pub use system::{ProcessUsage, is_elevated, os_info, process_usage};
-pub use text_window::{TextWindow, show_text_window};
 
 fn last_error(call: &'static str) -> crate::PlatformError {
     crate::PlatformError::Win32 {

@@ -38,7 +38,7 @@ pub use windows::short_path;
 
 /// Окно с текстом ответа нейросети.
 #[cfg(windows)]
-pub use windows::{TextWindow, show_text_window};
+pub use windows::{AnswerStatus, AnswerView, AnswerWindow, LogoPainter, show_answer_window};
 
 #[cfg(windows)]
 pub use windows::{
@@ -240,22 +240,22 @@ mod tests {
     #[cfg(windows)]
     #[test]
     #[ignore = "на 3 секунды показывает окно в углу экрана"]
-    fn text_window_shows_updates_and_closes() {
-        let window = show_text_window(
-            "Джарвис — ответ",
-            "Вы: кто такой Тони Старк?
-
-Джарвис: Тони",
-        )
-        .unwrap();
+    fn answer_window_shows_updates_and_closes() {
+        let view = |answer: &str, status| AnswerView {
+            question: "кто такой Тони Старк?".into(),
+            answer: answer.into(),
+            status,
+        };
+        let window = show_answer_window(view("", AnswerStatus::Thinking), None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(800));
         assert!(window.is_open());
-        window.set_text(
-            "Вы: кто такой Тони Старк?
-
-Джарвис: Тони Старк — гениальный изобретатель и глава              Stark Industries, сэр. Он же — Железный человек.",
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2200));
+        window.set(view(
+            "Тони Старк — гениальный изобретатель и глава Stark Industries, сэр.",
+            AnswerStatus::Answering,
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        window.set_status(AnswerStatus::Done);
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         window.close();
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!window.is_open());

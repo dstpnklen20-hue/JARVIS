@@ -202,6 +202,11 @@ const SUPERSAMPLE: u32 = 4;
 /// Тёмных сегментов на внешнем кольце реактора.
 const SEGMENTS: f32 = 10.0;
 
+/// Реактор в цвете ожидания для заголовка окна ответа (RGBA, сторона `size`).
+pub fn answer_logo(size: u32) -> Vec<u8> {
+    reactor_pixels(Indicator::Idle.color(), size)
+}
+
 /// Значок главного окна: реактор в цвете ожидания; RGBA и сторона квадрата.
 pub fn window_icon() -> (Vec<u8>, u32) {
     (icon_pixels(Indicator::Idle.color()), SIZE)
@@ -214,12 +219,17 @@ fn render_icon(color: [u8; 3]) -> anyhow::Result<Icon> {
 }
 
 fn icon_pixels(color: [u8; 3]) -> Vec<u8> {
+    reactor_pixels(color, SIZE)
+}
+
+/// Реактор стороной `size` пикселей: RGBA без предумножения.
+fn reactor_pixels(color: [u8; 3], size: u32) -> Vec<u8> {
     let tint = color.map(|v| f32::from(v) / 255.0);
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    let half = SIZE as f32 / 2.0;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    let half = size as f32 / 2.0;
     let step = 1.0 / SUPERSAMPLE as f32;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
+    for y in 0..size {
+        for x in 0..size {
             // Среднее по подвыборкам с предумноженной прозрачностью.
             let mut sum = [0.0f32; 4];
             for sy in 0..SUPERSAMPLE {
@@ -280,6 +290,30 @@ fn reactor(x: f32, y: f32, tint: [f32; 3]) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Посмотреть окно ответа глазами: `cargo test -p jarvis-app answer_window_demo -- --ignored`.
+    #[test]
+    #[ignore = "на 9 секунд показывает окно ответа в углу экрана"]
+    fn answer_window_demo() {
+        use jarvis_platform::{AnswerStatus, AnswerView, show_answer_window};
+        use std::time::Duration;
+        let question = "Джарвис, кто такой Тони Старк?";
+        let view = |answer: &str, status| AnswerView {
+            question: question.into(),
+            answer: answer.into(),
+            status,
+        };
+        let window =
+            show_answer_window(view("", AnswerStatus::Thinking), Some(answer_logo)).unwrap();
+        std::thread::sleep(Duration::from_millis(3000));
+        let answer = "Тони Старк — гениальный изобретатель, промышленник и глава Stark Industries, сэр. \
+                      Он же — Железный человек: бронекостюм собственной конструкции питается от дугового реактора.";
+        window.set(view(answer, AnswerStatus::Answering));
+        std::thread::sleep(Duration::from_millis(3000));
+        window.set_status(AnswerStatus::Done);
+        std::thread::sleep(Duration::from_millis(3000));
+        window.close();
+    }
 
     #[test]
     fn icon_is_opaque_inside_and_transparent_in_corners() {

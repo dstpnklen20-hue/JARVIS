@@ -40,7 +40,9 @@ use jarvis_llm::tools::CommandRequest;
 use jarvis_llm::{LanguageModel, LlmError};
 use jarvis_nlu::answers::{PermissionReply, parse_reply};
 use jarvis_nlu::{CommandMatcher, CommandPhrases, MatchResult, Thresholds};
-use jarvis_platform::{DialogButton, DialogHandle, DialogSpec, TextWindow, Waker};
+use jarvis_platform::{
+    AnswerStatus, AnswerView, AnswerWindow, DialogButton, DialogHandle, DialogSpec, Waker,
+};
 
 use crate::tray::{Indicator, UiMsg};
 
@@ -331,7 +333,7 @@ pub struct Core {
     /// (из журнала) уходит нейросети.
     llm_tool: RefCell<Option<String>>,
     /// Окно с вопросом и ответом (`llm.show_window`) и когда его закрыть.
-    text_window: Option<TextWindow>,
+    text_window: Option<AnswerWindow>,
     text_window_close_at: Option<Instant>,
 }
 
@@ -1132,7 +1134,7 @@ impl Core {
         if let Some(speech) = &self.speech {
             speech.prepare();
         }
-        self.show_answer_text(&question, "…");
+        self.show_answer_text(&question, "", AnswerStatus::Thinking);
         self.answer = Some(AnswerTurn {
             generation,
             question,
@@ -1166,7 +1168,7 @@ impl Core {
             }
             BrainEvent::Text { generation, text } if current(generation, &self.answer) => {
                 if let Some(question) = self.answer.as_ref().map(|a| a.question.clone()) {
-                    self.show_answer_text(&question, &text);
+                    self.show_answer_text(&question, &text, AnswerStatus::Answering);
                 }
             }
             BrainEvent::Done {
@@ -1184,7 +1186,7 @@ impl Core {
             } if current(generation, &self.answer) => {
                 tracing::warn!(?failure, "нейросеть не ответила");
                 if let Some(question) = self.answer.as_ref().map(|a| a.question.clone()) {
-                    self.show_answer_text(&question, &failure_text(&failure));
+                    self.show_answer_text(&question, &failure_text(&failure), AnswerStatus::Failed);
                 }
                 self.say_failure(&failure);
                 if let Some(answer) = self.answer.as_mut() {
@@ -1210,15 +1212,19 @@ impl Core {
     }
 
     /// Показать (или обновить) окно с вопросом и ответом.
-    fn show_answer_text(&mut self, question: &str, answer: &str) {
+    fn show_answer_text(&mut self, question: &str, answer: &str, status: AnswerStatus) {
         if !self.config.llm.show_window {
             return;
         }
-        let text = format!("Вы: {question}\n\nДжарвис: {answer}");
+        let view = AnswerView {
+            question: question.to_owned(),
+            answer: answer.to_owned(),
+            status,
+        };
         self.text_window_close_at = None;
         match &self.text_window {
-            Some(window) if window.is_open() => window.set_text(&text),
-            _ => match jarvis_platform::show_text_window("Джарвис", &text) {
+            Some(window) if window.is_open() => window.set(view),
+            _ => match jarvis_platform::show_answer_window(view, Some(crate::tray::answer_logo)) {
                 Ok(window) => self.text_window = Some(window),
                 Err(e) => tracing::warn!(error = %e, "окно ответа не открылось"),
             },
@@ -1302,6 +1308,12 @@ impl Core {
         };
         let error = answer.failure.as_ref().map(|f| format!("{f:?}"));
         self.journal_answer(&answer, error);
+        // Ответ договорён — бегущая полоса в окне останавливается.
+        if answer.failure.is_none()
+            && let Some(window) = &self.text_window
+        {
+            window.set_status(AnswerStatus::Done);
+        }
         self.close_answer_text_later();
         if answer.failure.is_none() {
             self.llm_follow_up = true;
