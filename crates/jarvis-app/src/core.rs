@@ -246,7 +246,7 @@ struct Dictation {
 /// Не меньше стольких секунд ждать открытия заметки (браузер, страница Keep).
 const NOTE_MIN_WAIT: Duration = Duration::from_secs(5);
 /// После того как заметка точно готова — ещё столько до «Слушаю, сэр».
-const NOTE_SETTLE: Duration = Duration::from_secs(2);
+const NOTE_SETTLE: Duration = Duration::from_millis(500);
 /// Сколько тишины после последней фразы считать концом диктовки.
 const DICTATION_PAUSE: Duration = Duration::from_secs(3);
 /// Сколько ждать начала диктовки после «Слушаю, сэр».
