@@ -109,6 +109,15 @@ pub fn local_hour() -> u8 {
         .hour()
 }
 
+/// Местные дата и время для заметки: «15.10.2026 00:15».
+pub fn note_stamp() -> String {
+    let format = time::macros::format_description!("[day].[month].[year] [hour]:[minute]");
+    time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .format(&format)
+        .unwrap_or_default()
+}
+
 pub fn now() -> String {
     let format = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_minute]"
@@ -122,6 +131,23 @@ pub fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_stamp_is_day_month_year_time() {
+        let stamp = note_stamp();
+        // «15.10.2026 00:15»
+        let parts: Vec<&str> = stamp.split([' ', '.', ':']).collect();
+        assert_eq!(parts.len(), 5, "{stamp}");
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [2, 2, 4, 2, 2]
+        );
+        assert!(
+            stamp
+                .chars()
+                .all(|c| c.is_ascii_digit() || " .:".contains(c))
+        );
+    }
 
     #[test]
     fn writes_one_json_line_per_entry() {

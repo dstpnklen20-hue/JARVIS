@@ -81,6 +81,8 @@ pub enum CoreMsg {
     Speech(SpeechEvent),
     /// Поток нейросети.
     Brain(BrainEvent),
+    /// Заметка для диктовки открыта и видна (или нет — почему).
+    NoteReady(Result<(), String>),
     /// Надиктованное записано в заметку (или нет — почему).
     NoteDone(Result<(), String>),
     TogglePause,
@@ -221,15 +223,34 @@ struct Heard {
 
 /// Диктовка в заметку: части текста по фразам; пауза после последней —
 /// записать.
+///
+/// Порядок (ваш, 2026-10-15): заметка открывается и проверяется (не меньше
+/// [`NOTE_MIN_WAIT`]) → ещё [`NOTE_SETTLE`] → «Слушаю, сэр» → диктовка →
+/// [`DICTATION_PAUSE`] тишины → запись → «Записал, сэр».
 struct Dictation {
     target: NoteTarget,
+    started: Instant,
+    /// Заметка готова — когда сказать «Слушаю, сэр».
+    listen_at: Option<Instant>,
+    /// «Слушаю, сэр» сказано, ждём текст.
+    listening: Option<Instant>,
+    /// Фразы с этими номерами и раньше — не диктовка (сама команда «запиши
+    /// идею» дописывается распознавателем уже после её выполнения).
+    ignore_upto: Option<u64>,
     parts: Vec<String>,
+    /// Когда человек последний раз говорил.
+    heard_at: Option<Instant>,
     commit_at: Option<Instant>,
 }
 
-/// Сколько тишины после фразы считать концом диктовки (фраза сама кончается
-/// через `listen.end_silence_ms`, это — сверху, на короткие паузы в мысли).
-const DICTATION_PAUSE: Duration = Duration::from_millis(1200);
+/// Не меньше стольких секунд ждать открытия заметки (браузер, страница Keep).
+const NOTE_MIN_WAIT: Duration = Duration::from_secs(5);
+/// После того как заметка точно готова — ещё столько до «Слушаю, сэр».
+const NOTE_SETTLE: Duration = Duration::from_secs(2);
+/// Сколько тишины после последней фразы считать концом диктовки.
+const DICTATION_PAUSE: Duration = Duration::from_secs(3);
+/// Сколько ждать начала диктовки после «Слушаю, сэр».
+const DICTATION_START_WAIT: Duration = Duration::from_secs(10);
 
 /// Команда ждёт ответа на вопрос-разрешение.
 struct Pending {
@@ -345,6 +366,8 @@ pub struct Core {
     after_wake: bool,
     /// Идёт диктовка в заметку («запиши идею» → «Слушаю, сэр»).
     dictation: Option<Dictation>,
+    /// Номер последней распознанной фразы.
+    last_utterance: Option<u64>,
     /// Номер первой фразы после «Джарвис»: она начинается с самого слова
     /// активации (см. `CommandResolver::strip_wake_lead`).
     wake_utterance: Option<u64>,
@@ -446,6 +469,7 @@ impl Core {
             llm_follow_up: false,
             after_wake: false,
             dictation: None,
+            last_utterance: None,
             wake_utterance: None,
             llm_commands: VecDeque::new(),
             llm_tool: RefCell::new(None),
@@ -477,6 +501,7 @@ impl Core {
                 Ok(CoreMsg::PlaySound(sound)) => self.play_sound(&sound),
                 Ok(CoreMsg::Speech(event)) => self.on_speech(event),
                 Ok(CoreMsg::Brain(event)) => self.on_brain(event),
+                Ok(CoreMsg::NoteReady(result)) => self.on_note_ready(result),
                 Ok(CoreMsg::NoteDone(result)) => self.on_note_done(result),
                 Ok(CoreMsg::Pipeline(event)) => self.on_pipeline(event),
                 Ok(CoreMsg::ActionDone { generation, result }) => {
@@ -509,14 +534,7 @@ impl Core {
         }
         self.tick_answer(now);
         self.next_llm_command(now);
-        if self
-            .dictation
-            .as_ref()
-            .and_then(|d| d.commit_at)
-            .is_some_and(|at| now >= at)
-        {
-            self.commit_dictation();
-        }
+        self.tick_dictation(now);
         if self.text_window_close_at.is_some_and(|at| now >= at) {
             self.text_window_close_at = None;
             if let Some(window) = self.text_window.take() {
@@ -646,6 +664,7 @@ impl Core {
     }
 
     fn on_transcript(&mut self, mut t: Transcript) {
+        self.last_utterance = Some(t.utterance);
         if matches!(self.state, State::Idle | State::Paused) {
             self.early.clear();
             return;
@@ -1191,31 +1210,94 @@ impl Core {
         self.apply(Event::ActionFinished { reply });
     }
 
-    /// «Запиши идею»: «Слушаю, сэр», заметка открывается, пока человек
-    /// говорит; текст копится до паузы (`commit_dictation`).
+    /// «Запиши идею»: открыть заметку и дождаться, пока она точно готова;
+    /// «Слушаю, сэр» — позже, в `tick_dictation`. Пока ждём — состояние
+    /// «выполняется»: команды не принимаются, «стоп» — да.
     fn start_dictation(&mut self, target: NoteTarget) {
-        tracing::info!(note = %target.title, "диктовка в заметку — слушаю");
-        self.apply(Event::Asked);
+        tracing::info!(note = %target.title, "диктовка в заметку — открываю заметку");
         let (url, title) = (target.url.clone(), target.title.clone());
+        let events = self.events.clone();
         let opened = std::thread::Builder::new()
             .name("jarvis-note-open".into())
             .spawn(move || {
                 let result =
-                    std::panic::catch_unwind(|| jarvis_platform::keep_open_note(&url, &title));
-                match result {
-                    Ok(Ok(())) => tracing::info!("заметка открыта"),
-                    Ok(Err(e)) => tracing::warn!(error = %e, "заметку не открыть заранее"),
-                    Err(_) => tracing::error!("открытие заметки завершилось паникой"),
-                }
+                    std::panic::catch_unwind(|| jarvis_platform::keep_open_note(&url, &title))
+                        .unwrap_or_else(|_| Err("открытие заметки завершилось паникой".into()));
+                let _ = events.send(CoreMsg::NoteReady(result));
             });
         if let Err(e) = opened {
-            tracing::warn!(error = %e, "не удалось запустить поток открытия заметки");
+            let _ = self.events.send(CoreMsg::NoteReady(Err(format!(
+                "не удалось запустить поток: {e}"
+            ))));
         }
         self.dictation = Some(Dictation {
             target,
+            started: Instant::now(),
+            listen_at: None,
+            listening: None,
+            ignore_upto: None,
             parts: Vec::new(),
+            heard_at: None,
             commit_at: None,
         });
+    }
+
+    fn on_note_ready(&mut self, result: Result<(), String>) {
+        let Some(d) = self.dictation.as_mut() else {
+            return; // диктовку уже отменили («стоп»)
+        };
+        match result {
+            Ok(()) => {
+                tracing::info!(
+                    open_ms = d.started.elapsed().as_millis() as u64,
+                    "заметка готова"
+                );
+                let ready = Instant::now().max(d.started + NOTE_MIN_WAIT);
+                d.listen_at = Some(ready + NOTE_SETTLE);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "заметка не открылась — диктовки не будет");
+                self.dictation = None;
+                self.apply(Event::ActionFinished {
+                    reply: Some(Reply::Failed),
+                });
+            }
+        }
+    }
+
+    fn tick_dictation(&mut self, now: Instant) {
+        let Some(d) = self.dictation.as_ref() else {
+            return;
+        };
+        match d.listening {
+            None if d.listen_at.is_some_and(|at| now >= at) => self.begin_dictation(),
+            None => {}
+            Some(_) if d.commit_at.is_some_and(|at| now >= at) => self.commit_dictation(),
+            // Пока человек диктует (и первые секунды после «Слушаю, сэр») —
+            // не отпускать ожидание: паузы в мысли длиннее обычного.
+            Some(since)
+                if d.heard_at.is_some() || now.duration_since(since) < DICTATION_START_WAIT =>
+            {
+                if matches!(self.state, State::Listening { .. }) {
+                    self.apply(Event::UserSpeaking);
+                }
+            }
+            Some(_) => {} // молчание — ожидание кончится само («Не расслышал, сэр»)
+        }
+    }
+
+    /// Заметка готова: распознавание — с чистого листа, «Слушаю, сэр».
+    fn begin_dictation(&mut self) {
+        let ignore_upto = self.last_utterance;
+        if let Some(d) = self.dictation.as_mut() {
+            d.listening = Some(Instant::now());
+            d.ignore_upto = ignore_upto;
+        }
+        // Новая фраза: недослушанное до сих пор (хвост «запиши идею») — не текст.
+        self.pipeline.set_transcribing(false);
+        self.pipeline.set_transcribing(true);
+        self.apply(Event::Asked);
+        tracing::info!("диктовка — слушаю");
         if !self.speak("Слушаю, сэр.".into(), Purpose::Notice) {
             self.play(Reply::Wake);
         }
@@ -1223,24 +1305,29 @@ impl Core {
 
     /// Фраза диктовки: копится; пока человек говорит — запись откладывается.
     fn on_dictation(&mut self, t: &Transcript, now: Instant) {
+        let Some(d) = self.dictation.as_mut() else {
+            return;
+        };
+        if d.listening.is_none() || d.ignore_upto.is_some_and(|n| t.utterance <= n) {
+            return;
+        }
         let text = t.text.trim().to_owned();
-        if !text.is_empty() {
-            self.send_ui(UiMsg::Heard(text.clone()));
-            self.apply(Event::UserSpeaking);
+        if text.is_empty() {
+            return;
         }
-        if let Some(d) = self.dictation.as_mut() {
-            if !t.is_final {
-                if !text.is_empty() {
-                    d.commit_at = None;
-                }
-            } else if !text.is_empty() {
-                d.parts.push(text);
-                d.commit_at = Some(now + DICTATION_PAUSE);
-            }
+        d.heard_at = Some(now);
+        if t.is_final {
+            d.parts.push(text.clone());
+            d.commit_at = Some(now + DICTATION_PAUSE);
+        } else {
+            d.commit_at = None;
         }
+        self.send_ui(UiMsg::Heard(text));
+        self.apply(Event::UserSpeaking);
     }
 
-    /// Диктовка кончилась — дописать строку в заметку (в своём потоке).
+    /// Диктовка кончилась — дописать строку с датой и временем в заметку
+    /// (в своём потоке).
     fn commit_dictation(&mut self) {
         let Some(d) = self.dictation.take() else {
             return;
@@ -1249,7 +1336,12 @@ impl Core {
         if text.trim().is_empty() {
             return;
         }
-        let line = format!("{}{}", d.target.prefix, text.trim());
+        let line = format!(
+            "{}{} — {}",
+            d.target.prefix,
+            jarvis_core::journal::note_stamp(),
+            text.trim()
+        );
         tracing::info!(note = %d.target.title, chars = line.chars().count(), "диктовка — записываю в заметку");
         self.apply(Event::Question);
         let events = self.events.clone();
@@ -1986,6 +2078,7 @@ impl Core {
                         window.close();
                     }
                     self.llm_commands.clear();
+                    self.dictation = None;
                 }
             }
         }
@@ -1999,7 +2092,12 @@ impl Core {
         }
         // Диктовка — только пока ждём текст; ушли из ожидания (тишина, стоп,
         // пауза) — недиктованное забыто.
-        if self.dictation.is_some() && !matches!(self.state, State::Listening { .. }) {
+        if self
+            .dictation
+            .as_ref()
+            .is_some_and(|d| d.listening.is_some())
+            && !matches!(self.state, State::Listening { .. })
+        {
             tracing::info!("диктовка прервана");
             self.dictation = None;
         }
