@@ -104,6 +104,15 @@ impl WakeMatcher {
             .map(String::as_str)
     }
 
+    /// Короткий обрывок начала слова активации («джой», «жар» перед
+    /// «жарвис»): до четырёх букв и первые две — как у одной из целей.
+    pub fn is_fragment(&self, word: &str) -> bool {
+        let head: String = word.chars().take(2).collect();
+        word.chars().count() <= 4
+            && head.chars().count() == 2
+            && self.targets.iter().any(|t| t.starts_with(&head))
+    }
+
     /// Индекс первого подходящего слова начиная с `from`.
     pub fn find(&self, words: &[String], from: usize) -> Option<usize> {
         words
@@ -200,6 +209,22 @@ impl SherpaWakeWord {
     }
 }
 
+/// Обращения перед «Джарвис», после которых он всё ещё в начале фразы.
+const LEAD_INS: [&str; 7] = ["эй", "ну", "слушай", "окей", "ок", "привет", "алло"];
+
+/// Слова фразы перед «Джарвис» — его можно считать началом фразы: ничего,
+/// обращение («эй», «слушай»), обрывки до двух букв (вздох, «а») или само
+/// слово активации, разбитое распознавателем («джой жарвис»). Иначе
+/// «Джарвис» прозвучал посреди речи — это не обращение к нему.
+pub(crate) fn starts_phrase(matcher: &WakeMatcher, before: &[String]) -> bool {
+    before.iter().all(|w| {
+        w.chars().count() <= 2
+            || LEAD_INS.contains(&w.as_str())
+            || matcher.is_fragment(w)
+            || matcher.near_miss(std::slice::from_ref(w)).is_some()
+    })
+}
+
 /// RMS → dBFS (тишина — −100).
 pub fn to_db(rms: f32) -> f32 {
     if rms > 1e-5 {
@@ -276,7 +301,18 @@ impl WakeWordEngine for SherpaWakeWord {
         {
             let words = normalize_words(&result.text);
             tracing::trace!(text = %result.text, "распознано");
-            if let Some(index) = self.matcher.find(&words, self.consumed_words) {
+            let found = self.matcher.find(&words, self.consumed_words);
+            if let Some(index) = found
+                && !starts_phrase(&self.matcher, &words[self.consumed_words..index])
+            {
+                // «…и тут я говорю: Джарвис» — это рассказ, не обращение.
+                tracing::info!(
+                    phrase = %result.text.trim(),
+                    "«Джарвис» посреди фразы — не отзываюсь"
+                );
+                self.consumed_words = words.len();
+                self.phrase_detected = true;
+            } else if let Some(index) = found {
                 let now_secs = self.fed_samples as f32 / MODEL_RATE as f32;
                 let started = word_start_secs(&result.tokens, result.timestamps.as_deref(), index)
                     .map(|t| result.start_time.unwrap_or(0.0) + t);
@@ -395,6 +431,33 @@ mod tests {
         assert_eq!(near("джарвис открой ютуб"), None);
         assert_eq!(near("открой ютуб"), None);
         assert_eq!(near("жар"), None);
+    }
+
+    #[test]
+    fn wake_word_counts_only_at_phrase_start() {
+        let m = WakeMatcher::new(["джарвис", "жарвис"], 1);
+        let start = |s: &str| starts_phrase(&m, &words(s));
+        assert!(start(""));
+        assert!(start("эй"));
+        assert!(start("ну слушай"));
+        assert!(start("а"));
+        // «Джарвис», разбитый распознавателем на два слова (запись 12 теста голоса).
+        assert!(start("джой"));
+        assert!(start("сервис"));
+        // Из журнала 2026-10-14: так «Джарвис» срабатывал посреди рассказа.
+        assert!(!start("допустим вот"));
+        assert!(!start("вот произнесение"));
+        assert!(!start("сейчас два слышал"));
+    }
+
+    #[test]
+    fn fragments_of_wake_word() {
+        let m = WakeMatcher::new(["джарвис", "жарвис"], 1);
+        assert!(m.is_fragment("джой"));
+        assert!(m.is_fragment("жар"));
+        assert!(!m.is_fragment("вот"));
+        assert!(!m.is_fragment("жаркий"));
+        assert!(!m.is_fragment("д"));
     }
 
     #[test]

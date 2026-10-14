@@ -70,11 +70,48 @@ pub const BUILTIN_FORGET_PERMISSIONS: &str = "builtin:forget_permissions";
 pub const BUILTIN_RELOAD_COMMANDS: &str = "builtin:reload_commands";
 pub const BUILTIN_DIALOG_ON: &str = "builtin:dialog_on";
 pub const BUILTIN_DIALOG_OFF: &str = "builtin:dialog_off";
+/// Отключиться: не слушать даже «Джарвис», но остаться открытым (пауза;
+/// включить — щелчок по реактору или «Пауза» в трее).
+pub const BUILTIN_SLEEP: &str = "builtin:sleep";
+/// Закрыть окно с ответом нейросети.
+pub const BUILTIN_CLOSE_ANSWER: &str = "builtin:close_answer";
 
 const BUILTINS: &[(&str, &[&str])] = &[
     (
         BUILTIN_STOP,
-        &["стоп", "стой", "хватит", "замолчи", "отбой", "остановись"],
+        &[
+            "стоп",
+            "стой",
+            "хватит",
+            "замолчи",
+            "помолчи",
+            "умолкни",
+            "отбой",
+            "остановись",
+            "прекрати",
+        ],
+    ),
+    (
+        BUILTIN_SLEEP,
+        &[
+            "отключись",
+            "отключайся",
+            "засыпай",
+            "спать",
+            "иди спать",
+            "режим сна",
+            "перестань слушать",
+        ],
+    ),
+    (
+        BUILTIN_CLOSE_ANSWER,
+        &[
+            "закрой ответ",
+            "закрой окно ответа",
+            "убери ответ",
+            "убери окно",
+            "скрой ответ",
+        ],
     ),
     (
         BUILTIN_FORGET_PERMISSIONS,
@@ -216,6 +253,29 @@ impl CommandResolver {
         normalize_words(text)
             .into_iter()
             .filter(|w| !self.wake.matches(w))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Первая фраза после «Джарвис» начинается с самого слова активации
+    /// (распознавание команды идёт с его начала), а распознаватель команд
+    /// иногда пишет его иначе, чем детектор: «гарвес», «джарс», «с». Такие
+    /// слова в начале фразы — тоже «Джарвис», а не команда (иначе — «Не
+    /// понял, сэр» сразу после «Да, сэр»).
+    pub fn strip_wake_lead(&self, text: &str) -> String {
+        let words = normalize_words(text);
+        let lead = words
+            .iter()
+            .take_while(|w| {
+                w.chars().count() <= 2
+                    || self.wake.matches(w)
+                    || self.wake.near_miss(std::slice::from_ref(w)).is_some()
+            })
+            .count();
+        words[lead..]
+            .iter()
+            .filter(|w| !self.wake.matches(w))
+            .cloned()
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -499,6 +559,37 @@ mod tests {
             "слушай включи музыку"
         );
         assert_eq!(resolver().resolve("джарвис"), Resolution::Empty);
+    }
+
+    #[test]
+    fn misheard_wake_word_at_phrase_start_is_stripped() {
+        // Так распознаватель команд записывал «Джарвис» (журнал 2026-10-14).
+        for heard in ["гарвес", "джарс", "с", "джарвис гарвес"] {
+            assert_eq!(resolver().strip_wake_lead(heard), "", "«{heard}»");
+        }
+        assert_eq!(
+            resolver().strip_wake_lead("джарс открой ютуб"),
+            "открой ютуб"
+        );
+        // Не в начале и не похожее на «Джарвис» — не трогаем.
+        assert_eq!(
+            resolver().strip_wake_lead("открой ютуб джарвис"),
+            "открой ютуб"
+        );
+        assert_eq!(
+            resolver().strip_wake_lead("погода в самаре"),
+            "погода в самаре"
+        );
+    }
+
+    #[test]
+    fn sleep_close_answer_and_more_stop_words_resolve() {
+        assert_eq!(id("помолчи"), BUILTIN_STOP);
+        assert_eq!(id("джарвис прекрати"), BUILTIN_STOP);
+        assert_eq!(id("отключись"), BUILTIN_SLEEP);
+        assert_eq!(id("джарвис режим сна"), BUILTIN_SLEEP);
+        assert_eq!(id("закрой ответ"), BUILTIN_CLOSE_ANSWER);
+        assert_eq!(id("убери окно"), BUILTIN_CLOSE_ANSWER);
     }
 
     #[test]

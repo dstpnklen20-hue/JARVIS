@@ -99,6 +99,7 @@ pub enum PipelineEvent {
 enum Control {
     Listen(bool),
     Transcribe(bool),
+    BargeIn(bool),
     Hotwords(Vec<String>),
     Shutdown,
 }
@@ -127,6 +128,13 @@ impl MuteGate {
 
     pub fn is_muted(&self) -> bool {
         (self.epoch.elapsed().as_millis() as u64) < self.until_ms.load(Ordering::Relaxed)
+    }
+
+    /// Звук прерван — глушить только хвост эха `tail`, а не до конца
+    /// прерванной фразы (иначе после «стоп» Джарвис не слышал бы «Джарвис»).
+    pub fn cut_to(&self, tail: Duration) {
+        let until = (self.epoch.elapsed() + tail).as_millis() as u64;
+        self.until_ms.fetch_min(until, Ordering::Relaxed);
     }
 }
 
@@ -162,6 +170,15 @@ impl Pipeline {
     /// его само; выключает ядро, когда команды больше не ждёт.
     pub fn set_transcribing(&self, on: bool) {
         let _ = self.control.send(Control::Transcribe(on));
+    }
+
+    /// Слушать команды и пока Джарвис говорит (длинный ответ нейросети):
+    /// распознавание команд получает настоящий звук, а не тишину, — чтобы
+    /// услышать «стоп». Слово активации по-прежнему не слышит своего голоса.
+    /// Выключение начинает распознавание заново: недослушанное (в том числе
+    /// голос Джарвиса из колонок) не попадёт в следующую команду.
+    pub fn set_barge_in(&self, on: bool) {
+        let _ = self.control.send(Control::BargeIn(on));
     }
 
     /// Новые подсказки распознавателю команд (после перезагрузки команд).
@@ -236,6 +253,8 @@ struct Worker<'a> {
     stt: SherpaStt,
     /// Распознаются ли сейчас команды.
     transcribing: bool,
+    /// Слушать команды и во время своей речи (см. [`Pipeline::set_barge_in`]).
+    barge_in: bool,
     speaker: Option<SpeakerEncoder>,
     /// Детектор речи для ожидания команды; `None` — не загрузился (тогда
     /// о речи судим только по распознанным словам).
@@ -296,6 +315,7 @@ fn worker(
         wake,
         stt,
         transcribing: false,
+        barge_in: false,
         speaker,
         vad,
         last_voice: None,
@@ -347,6 +367,13 @@ impl Worker<'_> {
                         self.start_transcribing();
                     }
                     self.transcribing = on;
+                    continue;
+                }
+                Some(Control::BargeIn(on)) => {
+                    if self.barge_in && !on && self.transcribing {
+                        self.start_transcribing();
+                    }
+                    self.barge_in = on;
                     continue;
                 }
                 Some(Control::Hotwords(phrases)) => {
@@ -436,8 +463,23 @@ impl Worker<'_> {
             return;
         }
         // Пока Джарвис говорит — подаём тишину: время потока идёт, а своего
-        // голоса модель не слышит.
-        if self.gate.is_muted() {
+        // голоса модель не слышит. В режиме перебивания (длинный ответ)
+        // настоящий звук получает распознавание команд — чтобы услышать «стоп».
+        let muted = self.gate.is_muted();
+        let barge = muted && self.barge_in && self.transcribing;
+        if muted && !barge {
+            self.resampled.iter_mut().for_each(|s| *s = 0.0);
+        }
+        if self.transcribing {
+            if let Some(transcript) = self.stt.accept(&self.resampled) {
+                (self.events)(PipelineEvent::Transcript(transcript));
+            }
+            // Детектор речи слышал бы голос Джарвиса — «человек говорит» не сообщаем.
+            if !barge {
+                self.report_voice();
+            }
+        }
+        if barge {
             self.resampled.iter_mut().for_each(|s| *s = 0.0);
         }
         crate::level::MIC.set_rms(crate::level::rms(&self.resampled));
@@ -446,13 +488,6 @@ impl Worker<'_> {
         if self.history.len() > cap {
             let excess = self.history.len() - cap;
             self.history.drain(..excess);
-        }
-
-        if self.transcribing {
-            if let Some(transcript) = self.stt.accept(&self.resampled) {
-                (self.events)(PipelineEvent::Transcript(transcript));
-            }
-            self.report_voice();
         }
 
         let Some(detection) = self.wake.accept(&self.resampled) else {

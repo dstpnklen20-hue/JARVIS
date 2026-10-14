@@ -32,15 +32,16 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetThreadDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect,
-    HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETWORKAREA, SW_SHOWNOACTIVATE,
+    CREATESTRUCTW, CS_DBLCLKS, CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, GWLP_USERDATA, GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW,
+    GetWindowRect, HTCAPTION, HTCLIENT, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE,
+    MSG, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETWORKAREA, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, WM_APP, WM_CLOSE, WM_CREATE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCRBUTTONUP, WM_PAINT,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::wide;
@@ -200,7 +201,8 @@ fn register_class() -> bool {
         unsafe {
             let wc = WNDCLASSEXW {
                 cbSize: size_of::<WNDCLASSEXW>() as u32,
-                style: CS_DROPSHADOW,
+                // Двойной щелчок по окну — закрыть.
+                style: CS_DROPSHADOW | CS_DBLCLKS,
                 lpfnWndProc: Some(window_proc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
@@ -1054,6 +1056,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                         DestroyWindow(hwnd);
                     }
                 }
+            }
+            0
+        }
+        // Закрыть можно не только крестиком: двойной щелчок или правая
+        // кнопка в любом месте окна (и по заголовку).
+        WM_LBUTTONDBLCLK | WM_NCLBUTTONDBLCLK | WM_RBUTTONUP | WM_NCRBUTTONUP => {
+            // SAFETY: закрываем своё окно в его потоке.
+            unsafe {
+                DestroyWindow(hwnd);
             }
             0
         }

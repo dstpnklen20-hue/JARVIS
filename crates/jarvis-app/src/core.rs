@@ -15,9 +15,9 @@ use jarvis_actions::{ActionError, CancelToken, Outcome, Question, Sound, System}
 use jarvis_app::answer::{SpeechQueue, thinking_cue_due};
 use jarvis_app::brain::{Brain, BrainEvent, Failure, ModelFactory, slot_values, tool_commands};
 use jarvis_app::resolver::{
-    BUILTIN_DIALOG_OFF, BUILTIN_DIALOG_ON, BUILTIN_FORGET_PERMISSIONS, BUILTIN_RELOAD_COMMANDS,
-    BUILTIN_STOP, CommandResolver, EXACT_SCORE, EarlyDecider, Resolution, hotword_phrases,
-    is_builtin, is_dialog_pair, spoken_phrase,
+    BUILTIN_CLOSE_ANSWER, BUILTIN_DIALOG_OFF, BUILTIN_DIALOG_ON, BUILTIN_FORGET_PERMISSIONS,
+    BUILTIN_RELOAD_COMMANDS, BUILTIN_SLEEP, BUILTIN_STOP, CommandResolver, EXACT_SCORE,
+    EarlyDecider, Resolution, hotword_phrases, is_builtin, is_dialog_pair, spoken_phrase,
 };
 use jarvis_app::speech::{self, Speech, SpeechEvent};
 use jarvis_app::system::PlatformSystem;
@@ -327,6 +327,11 @@ pub struct Core {
     llm_generation: u64,
     /// Сразу после ответа нейросети фраза без «Джарвис» — тоже вопрос (до IDLE).
     llm_follow_up: bool,
+    /// «Джарвис» прозвучал, первой фразы после него ещё не было.
+    after_wake: bool,
+    /// Номер первой фразы после «Джарвис»: она начинается с самого слова
+    /// активации (см. `CommandResolver::strip_wake_lead`).
+    wake_utterance: Option<u64>,
     /// Команды, которые попросила нейросеть, — по одной.
     llm_commands: VecDeque<CommandRequest>,
     /// Номер вызова команды нейросети, которая сейчас выполняется: её итог
@@ -423,6 +428,8 @@ impl Core {
             answer: None,
             llm_generation: 0,
             llm_follow_up: false,
+            after_wake: false,
+            wake_utterance: None,
             llm_commands: VecDeque::new(),
             llm_tool: RefCell::new(None),
             text_window: None,
@@ -592,6 +599,8 @@ impl Core {
         }
         self.apply(Event::WakeWord);
         if answering {
+            self.after_wake = true;
+            self.wake_utterance = None;
             // Пока человек договаривает команду, голос успеет загрузиться —
             // вдруг понадобится вопрос-разрешение с подробностями.
             if let Some(speech) = &self.speech
@@ -610,10 +619,18 @@ impl Core {
         }
     }
 
-    fn on_transcript(&mut self, t: Transcript) {
+    fn on_transcript(&mut self, mut t: Transcript) {
         if matches!(self.state, State::Idle | State::Paused) {
             self.early.clear();
             return;
+        }
+        // Первая фраза после «Джарвис» начинается с него самого — как бы его
+        // ни записал распознаватель («гарвес», «с»), это не команда.
+        if std::mem::take(&mut self.after_wake) {
+            self.wake_utterance = Some(t.utterance);
+        }
+        if self.wake_utterance == Some(t.utterance) {
+            t.text = self.resolver.strip_wake_lead(&t.text);
         }
         let now = Instant::now();
         let resolution = self.resolver.resolve(&t.text);
@@ -621,7 +638,18 @@ impl Core {
         // «Стоп» — в любом активном состоянии, даже во время вопроса и действия.
         // По частичному тексту — только точное слово: «сто…» ещё может
         // оказаться «столом», а не «стопом».
-        if matches!(&resolution, Resolution::Command { id, score, .. }
+        // Пока Джарвис отвечает, распознаватель может слышать и его голос из
+        // колонок — «стоп» тогда в конце чужой фразы: проверяем и хвост.
+        let stop_in_tail = matches!(self.state, State::Executing) && {
+            let words = jarvis_audio::wake::normalize_words(&t.text);
+            (1..=2.min(words.len())).any(|n| {
+                let tail = words[words.len() - n..].join(" ");
+                matches!(self.resolver.resolve(&tail), Resolution::Command { id, score, .. }
+                    if id == BUILTIN_STOP && score >= EXACT_SCORE)
+            })
+        };
+        if stop_in_tail
+            || matches!(&resolution, Resolution::Command { id, score, .. }
             if id == BUILTIN_STOP && (t.is_final || *score >= EXACT_SCORE))
         {
             self.emergency_stop(Stop::Voice);
@@ -744,6 +772,38 @@ impl Core {
 
         if id == BUILTIN_STOP {
             self.emergency_stop(Stop::Voice);
+            return;
+        }
+        if id == BUILTIN_SLEEP {
+            // Безвредная встроенная — без вопроса. Включить снова — щелчок по
+            // реактору или «Пауза» в трее (голосом нельзя: микрофон выключен).
+            let approval = Approval {
+                heard,
+                note: PermissionNote::Builtin,
+                answered_by: None,
+            };
+            self.write_journal(&approval, &id, "ok", None);
+            if !self.speak("Отключаюсь, сэр.".into(), Purpose::Notice) {
+                self.play(Reply::Done);
+            }
+            self.apply(Event::Pause);
+            return;
+        }
+        if id == BUILTIN_CLOSE_ANSWER {
+            let approval = Approval {
+                heard,
+                note: PermissionNote::Builtin,
+                answered_by: None,
+            };
+            let closed = self.text_window.take().is_some_and(|w| {
+                w.close();
+                true
+            });
+            self.text_window_close_at = None;
+            self.write_journal(&approval, &id, if closed { "ok" } else { "nothing" }, None);
+            // Молча, как выполненная команда: дальше — ожидание следующей.
+            self.apply(Event::Question);
+            self.apply(Event::ActionFinished { reply: None });
             return;
         }
         if id == BUILTIN_RELOAD_COMMANDS {
@@ -1148,6 +1208,8 @@ impl Core {
             commands: Vec::new(),
         });
         self.apply(Event::Question);
+        // Ответ бывает длинным — «стоп» должен слышаться и пока Джарвис говорит.
+        self.pipeline.set_barge_in(true);
     }
 
     fn on_brain(&mut self, event: BrainEvent) {
@@ -1308,6 +1370,7 @@ impl Core {
         };
         let error = answer.failure.as_ref().map(|f| format!("{f:?}"));
         self.journal_answer(&answer, error);
+        self.pipeline.set_barge_in(false);
         // Ответ договорён — бегущая полоса в окне останавливается.
         if answer.failure.is_none()
             && let Some(window) = &self.text_window
@@ -1763,6 +1826,10 @@ impl Core {
                 Effect::CloseAsk => self.close_dialog(),
                 Effect::StopAll => {
                     self.player.stop();
+                    // Звук оборван — микрофон глушится только на хвост эха,
+                    // а не до конца прерванной фразы: сразу слышно «Джарвис».
+                    self.gate.cut_to(ECHO_TAIL);
+                    self.pipeline.set_barge_in(false);
                     self.speaking = None;
                     self.asking_aloud_until = None;
                     // Скрипт — завершить (всё дерево процессов), ожидания — прервать.
