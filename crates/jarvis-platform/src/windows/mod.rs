@@ -9,6 +9,7 @@ mod dialog;
 mod event_loop;
 mod hotkey;
 mod instance;
+mod keep;
 mod keys;
 mod paths;
 mod power;
@@ -28,6 +29,7 @@ pub use event_loop::{
 };
 pub use hotkey::{HotkeyGuard, parse_hotkey, register_hotkey};
 pub use instance::acquire_single_instance;
+pub use keep::{keep_append_line, keep_open_note};
 pub use keys::{press_keys, release_all_keys};
 pub use paths::short_path;
 pub use power::{Power, power, set_volume};

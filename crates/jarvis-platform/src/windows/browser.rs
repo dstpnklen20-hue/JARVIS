@@ -204,7 +204,7 @@ pub fn focus_browser() -> bool {
 }
 
 /// Видимые окна Firefox сверху вниз (последнее активное — первым).
-fn browser_windows() -> Vec<RawHwnd> {
+pub(super) fn browser_windows() -> Vec<RawHwnd> {
     let mut found: Vec<RawHwnd> = Vec::new();
     // SAFETY: колбэк получает указатель на `found`, который живёт до конца
     // EnumWindows и после него не используется колбэком.
@@ -238,7 +238,7 @@ unsafe extern "system" fn collect_window(hwnd: RawHwnd, lparam: LPARAM) -> BOOL 
 /// просто попросить; подключиться к вводу активного окна (AttachThreadInput);
 /// «нажать» клавишу без назначения — после своего ввода процессу разрешено
 /// сменить активное окно.
-fn bring_to_front(hwnd: RawHwnd) -> bool {
+pub(super) fn bring_to_front(hwnd: RawHwnd) -> bool {
     // SAFETY: hwnd — окно из EnumWindows; если оно уже закрыто, функции просто вернут ошибку.
     unsafe {
         if IsIconic(hwnd) != 0 {
@@ -289,7 +289,7 @@ fn bring_to_front(hwnd: RawHwnd) -> bool {
     is_foreground(hwnd)
 }
 
-fn is_foreground(hwnd: RawHwnd) -> bool {
+pub(super) fn is_foreground(hwnd: RawHwnd) -> bool {
     // SAFETY: без аргументов.
     unsafe { GetForegroundWindow() == hwnd }
 }

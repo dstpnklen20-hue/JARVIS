@@ -126,6 +126,18 @@ pub enum Outcome {
     Play(Sound),
     /// `ask`: задать вопрос и ждать ответа — дальше решает ядро.
     Ask(Question),
+    /// `dictate_note`: выслушать текст и дописать в заметку — дальше ядро.
+    Dictate(NoteTarget),
+}
+
+/// Заметка Google Keep, куда дописывать надиктованное.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteTarget {
+    pub url: String,
+    /// Заголовок — по нему находится текст заметки на странице.
+    pub title: String,
+    /// Начало строки («- »).
+    pub prefix: String,
 }
 
 /// Вопрос с вариантами ответа.
@@ -362,6 +374,8 @@ pub fn execute(action: &ActionSpec, ctx: &Context<'_>) -> Result<Outcome, Action
                     Outcome::Play(sound) => (ctx.play)(sound),
                     // Вопрос — всегда последний шаг (проверено в манифесте).
                     Outcome::Ask(question) => return Ok(Outcome::Ask(question)),
+                    // В цепочке диктовки не бывает (проверено в манифесте).
+                    Outcome::Dictate(target) => return Ok(Outcome::Dictate(target)),
                     Outcome::Done => {}
                 }
             }
@@ -388,6 +402,11 @@ pub fn execute(action: &ActionSpec, ctx: &Context<'_>) -> Result<Outcome, Action
                 }
             }
         }
+        ActionSpec::DictateNote { url, title, prefix } => Ok(Outcome::Dictate(NoteTarget {
+            url: url.trim().to_owned(),
+            title: title.trim().to_owned(),
+            prefix: prefix.clone(),
+        })),
         ActionSpec::Ask { file, choices } => Ok(Outcome::Ask(Question {
             sound: ctx.dir.join(file),
             choices: choices
@@ -982,5 +1001,25 @@ mod tests {
             ..Fake::default()
         };
         assert!(matches!(run(&close, &broken), Err(ActionError::Close(_))));
+    }
+
+    #[test]
+    fn dictate_note_hands_target_to_core() {
+        let action = ActionSpec::DictateNote {
+            url: " https://keep.google.com/#NOTE/abc ".into(),
+            title: "Идеи".into(),
+            prefix: "- ".into(),
+        };
+        let fake = Fake::default();
+        assert_eq!(
+            run(&action, &fake),
+            Ok(Outcome::Dictate(NoteTarget {
+                url: "https://keep.google.com/#NOTE/abc".into(),
+                title: "Идеи".into(),
+                prefix: "- ".into(),
+            }))
+        );
+        // Ничего системного действие само не делает — открывает и пишет ядро.
+        assert!(calls(&fake).is_empty());
     }
 }

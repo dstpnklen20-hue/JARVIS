@@ -58,6 +58,10 @@ struct CommandFile {
     close_process: Option<String>,
 }
 
+fn default_note_prefix() -> String {
+    "- ".to_owned()
+}
+
 fn default_reply() -> String {
     Reply::Done.key().to_owned()
 }
@@ -137,6 +141,18 @@ pub enum ActionSpec {
     /// Дождаться, пока запустится процесс (`faceitclient.exe`); не дождались
     /// за `timeout_sec` — ошибка («Не удалось, сэр»).
     WaitProcess { name: String, timeout_sec: u64 },
+    /// Надиктовать текст в заметку Google Keep: «Слушаю, сэр» → текст
+    /// записывается строкой в конец заметки (Firefox; заметка остаётся
+    /// открытой). Только отдельным действием.
+    DictateNote {
+        /// Адрес заметки (`https://keep.google.com/…#NOTE/…`).
+        url: String,
+        /// Заголовок заметки — по нему находится её текст на странице.
+        title: String,
+        /// Начало строки («- » — как пункт списка).
+        #[serde(default = "default_note_prefix")]
+        prefix: String,
+    },
     /// Спросить голосом (WAV из папки пакета) и ждать ответа: ответ из
     /// `choices` выполняет команду с этим id — со своим разрешением.
     /// Только отдельным действием или последним шагом цепочки.
@@ -248,6 +264,9 @@ impl ActionSpec {
             ActionSpec::WaitProcess { name, timeout_sec } => {
                 format!("дождётся запуска {name} (не дольше {timeout_sec} с)")
             }
+            ActionSpec::DictateNote { title, .. } => format!(
+                "выслушает и допишет строкой в заметку Google Keep «{title}» (откроет её в Firefox)"
+            ),
             ActionSpec::Ask { file, choices } => format!(
                 "спросит ({}) и по ответу выполнит: {}",
                 file.display(),
@@ -872,6 +891,25 @@ fn validate_action(
                 if !wd.is_dir() {
                     return Err(format!("launch_app: папки {} нет", wd.display()));
                 }
+            }
+            Ok(())
+        }
+        ActionSpec::DictateNote { url, title, prefix } => {
+            if in_sequence {
+                return Err("dictate_note: только отдельным действием".into());
+            }
+            if !url.trim().starts_with("https://keep.google.com/") || !url.contains("#NOTE/") {
+                return Err(format!(
+                    "dictate_note: url «{url}» — нужен адрес заметки Keep (https://keep.google.com/…#NOTE/…)"
+                ));
+            }
+            if title.trim().is_empty() {
+                return Err(
+                    "dictate_note: title — заголовок заметки, по нему находится её текст".into(),
+                );
+            }
+            if prefix.chars().any(char::is_control) || prefix.chars().count() > 10 {
+                return Err("dictate_note: prefix — до 10 символов, без управляющих".into());
             }
             Ok(())
         }
@@ -1903,5 +1941,49 @@ process = "notepad.exe"
         assert_eq!(r.commands.len(), 2);
         assert_eq!(r.get("c_close").unwrap().description, "закроет Блокнот");
         assert!(r.errors[0].message.contains("уже есть"), "{:?}", r.errors);
+    }
+
+    #[test]
+    fn dictate_note_needs_keep_note_url_and_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = "type = \"dictate_note\"
+url = \"https://keep.google.com/u/3/#NOTE/abc\"
+title = \"Идеи\"";
+        let r = one(dir.path(), r#""запиши идею""#, "", note);
+        ok(&r);
+        match &r.commands[0].action {
+            ActionSpec::DictateNote { prefix, .. } => assert_eq!(prefix, "- "),
+            other => panic!("{other:?}"),
+        }
+        let r = one(
+            dir.path(),
+            r#""запиши идею""#,
+            "",
+            "type = \"dictate_note\"
+url = \"https://example.com\"
+title = \"Идеи\"",
+        );
+        fails(&r, "адрес заметки Keep");
+        let r = one(
+            dir.path(),
+            r#""запиши идею""#,
+            "",
+            "type = \"dictate_note\"
+url = \"https://keep.google.com/#NOTE/abc\"
+title = \" \"",
+        );
+        fails(&r, "title");
+        // В цепочке — нельзя: дальше решает голос, а не следующий шаг.
+        let r = one(
+            dir.path(),
+            r#""запиши идею""#,
+            "",
+            "type = \"sequence\"
+[[command.action.steps]]
+type = \"dictate_note\"
+             url = \"https://keep.google.com/#NOTE/abc\"
+title = \"Идеи\"",
+        );
+        fails(&r, "только отдельным действием");
     }
 }
