@@ -553,8 +553,15 @@ impl Core {
                 heard,
                 similarity,
                 threshold,
+                level_db,
             } => {
-                tracing::info!(%heard, similarity, threshold, "«Джарвис» сказал не ваш голос — игнорирую");
+                tracing::info!(
+                    %heard,
+                    similarity,
+                    threshold,
+                    level_db = format_args!("{level_db:.0}"),
+                    "«Джарвис» сказал не ваш голос — игнорирую"
+                );
             }
             PipelineEvent::CaptureLost(why) => {
                 tracing::warn!(%why, "микрофон недоступен, пробую снова");
@@ -577,6 +584,10 @@ impl Core {
                 | State::FollowUp { .. }
                 | State::Conversation { .. }
         );
+        if !answering {
+            // Промолчит — пусть в логе будет видно почему.
+            tracing::info!(heard = %wake.heard, state = ?self.state, "«Джарвис» услышан, но сейчас не отвечаю");
+        }
         self.apply(Event::WakeWord);
         if answering {
             // Пока человек договаривает команду, голос успеет загрузиться —
@@ -591,6 +602,7 @@ impl Core {
                 voice = ?wake.similarity,
                 verify_ms = wake.verify_time.as_millis() as u64,
                 reply_ms = wake.detected_at.elapsed().as_millis() as u64,
+                level_db = format_args!("{:.0}", wake.level_db),
                 "«Джарвис» — отвечаю"
             );
         }

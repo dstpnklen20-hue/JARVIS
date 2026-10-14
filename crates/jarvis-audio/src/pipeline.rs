@@ -63,6 +63,8 @@ pub struct WakeEvent {
     /// Сходство с образцом голоса, если проверка включена.
     pub similarity: Option<f32>,
     pub verify_time: Duration,
+    /// Громкость фразы, dBFS ([`crate::wake::WakeDetection::level_db`]).
+    pub level_db: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +88,7 @@ pub enum PipelineEvent {
         heard: String,
         similarity: f32,
         threshold: f32,
+        level_db: f32,
     },
     /// Микрофон недоступен; конвейер будет пробовать снова.
     CaptureLost(String),
@@ -478,6 +481,7 @@ impl Worker<'_> {
                             heard: detection.heard,
                             similarity: other.unwrap_or(0.0),
                             threshold: *threshold,
+                            level_db: detection.level_db,
                         });
                         return;
                     }
@@ -491,6 +495,7 @@ impl Worker<'_> {
             detected_at,
             similarity,
             verify_time,
+            level_db: detection.level_db,
         }));
 
         // Сразу включаем распознавание команды и отдаём ему звук с начала

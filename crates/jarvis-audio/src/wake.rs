@@ -24,6 +24,9 @@ pub struct WakeDetection {
     /// началось слово, если движок это знает. Нужно, чтобы вырезать слово
     /// для проверки голоса.
     pub started_secs_ago: Option<f32>,
+    /// Громкость фразы до срабатывания: самая громкая порция (~20 мс), dBFS.
+    /// Для разбора промахов: сравнить с громкостью «почти Джарвис» в логе.
+    pub level_db: f32,
 }
 
 /// Движок слова активации. Принимает 16 кГц моно.
@@ -53,6 +56,8 @@ pub struct WakeMatcher {
 /// Короче этого слово не сравниваем: «да», «вас» и т. п. не должны
 /// оказаться «похожими» на слово активации.
 const MIN_WORD_CHARS: usize = 4;
+/// «Почти слово активации» для лога: на столько букв больше допуска.
+const NEAR_EXTRA: usize = 2;
 
 impl WakeMatcher {
     pub fn new(words: impl IntoIterator<Item = impl AsRef<str>>, max_distance: usize) -> Self {
@@ -84,6 +89,21 @@ impl WakeMatcher {
         })
     }
 
+    /// Слово похоже на слово активации, но не засчитано: отличие на
+    /// [`NEAR_EXTRA`] букв больше допуска. Только для лога промахов.
+    pub fn near_miss<'w>(&self, words: &'w [String]) -> Option<&'w str> {
+        words
+            .iter()
+            .filter(|w| w.chars().count() >= MIN_WORD_CHARS && !self.matches(w))
+            .find(|w| {
+                self.targets.iter().any(|t| {
+                    let allowed = self.max_distance.min(t.chars().count() / 3);
+                    strsim::levenshtein(w, t) <= allowed + NEAR_EXTRA
+                })
+            })
+            .map(String::as_str)
+    }
+
     /// Индекс первого подходящего слова начиная с `from`.
     pub fn find(&self, words: &[String], from: usize) -> Option<usize> {
         words
@@ -110,6 +130,10 @@ pub struct SherpaWakeWord {
     stream_samples: u64,
     /// Сколько последних отсчётов подряд — тишина.
     quiet_samples: u64,
+    /// Самая громкая порция текущей фразы (RMS).
+    phrase_peak: f32,
+    /// В текущей фразе уже было слово активации.
+    phrase_detected: bool,
 }
 
 impl SherpaWakeWord {
@@ -131,6 +155,8 @@ impl SherpaWakeWord {
             fed_samples: 0,
             stream_samples: 0,
             quiet_samples: 0,
+            phrase_peak: 0.0,
+            phrase_detected: false,
         };
         engine.warm_up();
         engine
@@ -152,6 +178,34 @@ impl SherpaWakeWord {
         self.consumed_words = 0;
         self.last_text.clear();
         self.stream_samples = 0;
+        self.phrase_peak = 0.0;
+        self.phrase_detected = false;
+    }
+
+    /// Фраза кончилась без слова активации, но в ней было похожее слово —
+    /// записать в лог (что услышано и как громко), чтобы разобрать промах.
+    fn log_near_miss(&self) {
+        if self.phrase_detected {
+            return;
+        }
+        let words = normalize_words(&self.last_text);
+        if let Some(word) = self.matcher.near_miss(&words) {
+            tracing::info!(
+                heard = word,
+                phrase = %self.last_text.trim(),
+                level_db = format_args!("{:.0}", to_db(self.phrase_peak)),
+                "похоже на «Джарвис», но не засчитано"
+            );
+        }
+    }
+}
+
+/// RMS → dBFS (тишина — −100).
+pub fn to_db(rms: f32) -> f32 {
+    if rms > 1e-5 {
+        20.0 * rms.log10()
+    } else {
+        -100.0
     }
 }
 
@@ -208,7 +262,9 @@ impl WakeWordEngine for SherpaWakeWord {
         }
 
         self.stream_samples += samples.len() as u64;
-        if rms(samples) < QUIET_RMS {
+        let level = rms(samples);
+        self.phrase_peak = self.phrase_peak.max(level);
+        if level < QUIET_RMS {
             self.quiet_samples += samples.len() as u64;
         } else {
             self.quiet_samples = 0;
@@ -227,7 +283,9 @@ impl WakeWordEngine for SherpaWakeWord {
                 detection = Some(WakeDetection {
                     heard: words[index].clone(),
                     started_secs_ago: started.map(|s| (now_secs - s).max(0.0)),
+                    level_db: to_db(self.phrase_peak),
                 });
+                self.phrase_detected = true;
                 // Слово может ещё дописываться («жарви» → «жарвис») —
                 // повторно его не засчитываем.
                 self.consumed_words = words.len();
@@ -242,6 +300,7 @@ impl WakeWordEngine for SherpaWakeWord {
             secs(self.stream_samples),
             secs(self.quiet_samples),
         ) {
+            self.log_near_miss();
             self.reset_stream();
         }
         detection
@@ -324,6 +383,25 @@ mod tests {
         ] {
             assert!(!m.matches(heard), "{heard} не должно сработать");
         }
+    }
+
+    #[test]
+    fn near_miss_finds_similar_but_not_matching_words() {
+        let m = WakeMatcher::new(["джарвис", "жарвис"], 1);
+        let near = |s: &str| m.near_miss(&words(s)).map(str::to_owned);
+        assert_eq!(near("сервис"), Some("сервис".into()));
+        assert_eq!(near("ну дарвин открой"), Some("дарвин".into()));
+        // Засчитанное слово — не промах; непохожие и короткие слова — тоже.
+        assert_eq!(near("джарвис открой ютуб"), None);
+        assert_eq!(near("открой ютуб"), None);
+        assert_eq!(near("жар"), None);
+    }
+
+    #[test]
+    fn db_of_level() {
+        assert_eq!(to_db(1.0), 0.0);
+        assert!((to_db(0.1) + 20.0).abs() < 1e-4);
+        assert_eq!(to_db(0.0), -100.0);
     }
 
     #[test]

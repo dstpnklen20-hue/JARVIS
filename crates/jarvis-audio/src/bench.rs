@@ -116,6 +116,7 @@ mod tests {
             samples.iter().any(|s| *s > 0.9).then(|| WakeDetection {
                 heard: "громко".into(),
                 started_secs_ago: None,
+                level_db: 0.0,
             })
         }
         fn reset(&mut self) {}
