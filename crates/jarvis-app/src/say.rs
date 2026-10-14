@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use jarvis_audio::pack::VoicePack;
 use jarvis_audio::player::Player;
-use jarvis_audio::tts::{PiperTts, TextToSpeech};
+use jarvis_audio::tts::{PiperTts, SynthParams, TextToSpeech};
 use jarvis_audio::wav;
 use jarvis_core::Config;
 use jarvis_core::config::resolve;
@@ -39,7 +39,7 @@ pub fn run(
     })?;
 
     let started = Instant::now();
-    let tts = PiperTts::new(&model, config.voice.tts_speed)?;
+    let tts = PiperTts::new(&model, SynthParams::from_config(&config.voice))?;
     let load = started.elapsed();
     let started = Instant::now();
     let clip = tts.synthesize(text)?.trimmed();

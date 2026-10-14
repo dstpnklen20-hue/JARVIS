@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use jarvis_audio::AudioError;
-use jarvis_audio::tts::{PiperTts, TextToSpeech, VoiceModel};
+use jarvis_audio::tts::{PiperTts, SynthParams, TextToSpeech, VoiceModel};
 use jarvis_audio::wav::Clip;
 use jarvis_core::commands::Command;
 use jarvis_core::slots::{SlotValues, fill};
@@ -68,11 +68,11 @@ impl Speech {
     pub fn spawn(
         voice_name: String,
         voice: VoiceModel,
-        speed: f32,
+        params: SynthParams,
         events: SpeechSink,
     ) -> std::io::Result<Self> {
         let loader: Loader = Box::new(move || {
-            PiperTts::new(&voice, speed).map(|t| Box::new(t) as Box<dyn TextToSpeech>)
+            PiperTts::new(&voice, params).map(|t| Box::new(t) as Box<dyn TextToSpeech>)
         });
         Self::spawn_with(voice_name, loader, IDLE_UNLOAD, events)
     }

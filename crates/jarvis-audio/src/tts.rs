@@ -16,6 +16,38 @@ use crate::AudioError;
 use crate::models::path_str;
 use crate::wav::Clip;
 
+/// Как звучит синтез: темп и «случайность» Piper (см. `voice.tts_noise`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SynthParams {
+    /// 1.0 — обычный темп; больше — быстрее.
+    pub speed: f32,
+    /// Шум в голосе (noise_scale).
+    pub noise: f32,
+    /// Разброс длительности звуков (noise_scale_w).
+    pub noise_w: f32,
+}
+
+impl Default for SynthParams {
+    /// Значения Piper по умолчанию.
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            noise: 0.667,
+            noise_w: 0.8,
+        }
+    }
+}
+
+impl SynthParams {
+    pub fn from_config(voice: &jarvis_core::config::Voice) -> Self {
+        Self {
+            speed: voice.tts_speed,
+            noise: voice.tts_noise,
+            noise_w: voice.tts_noise_w,
+        }
+    }
+}
+
 /// Сменный движок синтеза.
 pub trait TextToSpeech: Send {
     fn synthesize(&self, text: &str) -> Result<Clip, AudioError>;
@@ -52,13 +84,15 @@ pub struct PiperTts {
 }
 
 impl PiperTts {
-    pub fn new(voice: &VoiceModel, speed: f32) -> Result<Self, AudioError> {
+    pub fn new(voice: &VoiceModel, params: SynthParams) -> Result<Self, AudioError> {
         let config = OfflineTtsConfig {
             model: OfflineTtsModelConfig {
                 vits: OfflineTtsVitsModelConfig {
                     model: Some(path_str(&voice.model)),
                     tokens: Some(path_str(&voice.tokens)),
                     data_dir: Some(path_str(&voice.data_dir)),
+                    noise_scale: params.noise,
+                    noise_scale_w: params.noise_w,
                     ..Default::default()
                 },
                 num_threads: 2,
@@ -70,7 +104,10 @@ impl PiperTts {
             what: "синтеза речи",
             path: voice.model.clone(),
         })?;
-        let engine = Self { tts, speed };
+        let engine = Self {
+            tts,
+            speed: params.speed,
+        };
         // Прогрев: первый синтез заметно медленнее.
         let _ = engine.synthesize("Готов.");
         Ok(engine)

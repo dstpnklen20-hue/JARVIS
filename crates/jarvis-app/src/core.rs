@@ -25,7 +25,7 @@ use jarvis_audio::pack::{DayPart, VoicePack};
 use jarvis_audio::pipeline::{MuteGate, Pipeline, PipelineEvent, PipelineSettings, WakeEvent};
 use jarvis_audio::player::Player;
 use jarvis_audio::stt::Transcript;
-use jarvis_audio::tts::VoiceModel;
+use jarvis_audio::tts::{SynthParams, VoiceModel};
 use jarvis_audio::wake::WakeMatcher;
 use jarvis_audio::wav::Clip;
 use jarvis_core::Config;
@@ -120,7 +120,7 @@ pub struct CoreParams {
 pub struct VoiceSetup {
     pub name: String,
     pub model: VoiceModel,
-    pub speed: f32,
+    pub params: SynthParams,
 }
 
 /// Зачем синтезируется фраза — от этого зависит, нужна ли она ещё, когда
@@ -357,7 +357,7 @@ impl Core {
             Speech::spawn(
                 voice.name,
                 voice.model,
-                voice.speed,
+                voice.params,
                 Box::new(move |event| {
                     let _ = speech_events.send(CoreMsg::Speech(event));
                 }),

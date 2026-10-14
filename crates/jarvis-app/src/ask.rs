@@ -16,7 +16,7 @@ use jarvis_app::answer::SpeechQueue;
 use jarvis_app::brain::{Brain, BrainEvent, ModelFactory, tool_commands};
 use jarvis_audio::pack::VoicePack;
 use jarvis_audio::player::Player;
-use jarvis_audio::tts::{PiperTts, TextToSpeech};
+use jarvis_audio::tts::{PiperTts, SynthParams, TextToSpeech};
 use jarvis_core::Config;
 use jarvis_core::commands::Registry;
 use jarvis_core::config::resolve;
@@ -52,7 +52,7 @@ pub fn run(root: &Path, config: &Config, question: &str) -> anyhow::Result<()> {
         .voice
         .tts_voice()
         .and_then(|name| jarvis_audio::models::tts_voice(root, config, name).ok())
-        .and_then(|model| PiperTts::new(&model, config.voice.tts_speed).ok());
+        .and_then(|model| PiperTts::new(&model, SynthParams::from_config(&config.voice)).ok());
     let pack = VoicePack::load(&resolve(root, &config.paths.sounds).join(&config.voice.pack))
         .context("звуковой пакет не загружен")?;
     let mut player = Player::new(&pack, config.voice.volume).context("вывод звука не открылся")?;

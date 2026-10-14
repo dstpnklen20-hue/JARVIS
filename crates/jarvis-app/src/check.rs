@@ -271,7 +271,11 @@ fn check_tts(root: &Path, config: &Config) -> Item {
         }
     };
     let started = std::time::Instant::now();
-    let result = jarvis_audio::tts::PiperTts::new(&model, config.voice.tts_speed).and_then(|tts| {
+    let result = jarvis_audio::tts::PiperTts::new(
+        &model,
+        jarvis_audio::tts::SynthParams::from_config(&config.voice),
+    )
+    .and_then(|tts| {
         use jarvis_audio::tts::TextToSpeech as _;
         let load = started.elapsed();
         let t = std::time::Instant::now();

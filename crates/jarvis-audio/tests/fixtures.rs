@@ -91,7 +91,7 @@ fn wake_word_fires_once_in_every_wake_recording() {
 #[test]
 #[ignore = "оценка голосов: JARVIS_TTS_EVAL_DIR"]
 fn tts_voice_evaluation() {
-    use jarvis_audio::tts::{PiperTts, TextToSpeech, VoiceModel};
+    use jarvis_audio::tts::{PiperTts, SynthParams, TextToSpeech, VoiceModel};
     let Some(dir) = std::env::var_os("JARVIS_TTS_EVAL_DIR") else {
         return;
     };
@@ -113,7 +113,7 @@ fn tts_voice_evaluation() {
     for voice_dir in voices {
         let voice = VoiceModel::from_dir(&voice_dir).unwrap();
         let started = std::time::Instant::now();
-        let tts = PiperTts::new(&voice, 1.0).unwrap();
+        let tts = PiperTts::new(&voice, SynthParams::default()).unwrap();
         let load = started.elapsed();
         let (mut words, mut correct, mut audio, mut synth) = (0usize, 0usize, 0f32, 0f32);
         for phrase in phrases {
@@ -143,10 +143,10 @@ fn tts_voice_evaluation() {
 #[test]
 #[ignore = "нужны модели: scripts/download-models.ps1"]
 fn default_voice_is_intelligible() {
-    use jarvis_audio::tts::{PiperTts, TextToSpeech};
+    use jarvis_audio::tts::{PiperTts, SynthParams, TextToSpeech};
     let (config, models) = setup();
     let voice = jarvis_audio::models::tts_voice(&root(), config, "dmitri").expect(NEEDS_MODELS);
-    let tts = PiperTts::new(&voice, 1.0).unwrap();
+    let tts = PiperTts::new(&voice, SynthParams::default()).unwrap();
     let recognizer = create_recognizer(&models.asr, Endpointing::default()).unwrap();
     for (phrase, expected) in [
         (

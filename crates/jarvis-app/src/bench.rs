@@ -238,7 +238,7 @@ fn bench_commands(
 
 /// Замер синтеза речи на типичных фразах Джарвиса.
 pub fn bench_tts(root: &Path, config: &Config) -> anyhow::Result<()> {
-    use jarvis_audio::tts::{PiperTts, TextToSpeech as _};
+    use jarvis_audio::tts::{PiperTts, SynthParams, TextToSpeech as _};
     const PHRASES: &[&str] = &[
         "Сэр, команда «открой ютуб» откроет YouTube в браузере. Разрешить?",
         "Сэр, вы имели в виду «открой гугл» или «открой яндекс»?",
@@ -252,7 +252,7 @@ pub fn bench_tts(root: &Path, config: &Config) -> anyhow::Result<()> {
     };
     let model = jarvis_audio::models::tts_voice(root, config, name)?;
     let started = Instant::now();
-    let tts = PiperTts::new(&model, config.voice.tts_speed)?;
+    let tts = PiperTts::new(&model, SynthParams::from_config(&config.voice))?;
     println!(
         "Синтез речи, голос {name}: загрузка и прогрев {} мс",
         started.elapsed().as_millis()

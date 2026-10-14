@@ -362,7 +362,7 @@ fn voice_setup(root: &Path, config: &Config) -> Option<VoiceSetup> {
         Ok(model) => Some(VoiceSetup {
             name: name.to_owned(),
             model,
-            speed: config.voice.tts_speed,
+            params: jarvis_audio::tts::SynthParams::from_config(&config.voice),
         }),
         Err(e) => {
             tracing::warn!(

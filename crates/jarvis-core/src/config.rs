@@ -145,6 +145,11 @@ pub struct Voice {
     /// Голос синтеза («dmitri»…) или «none».
     pub tts: String,
     pub tts_speed: f32,
+    /// Шум в голосе синтеза (noise_scale у Piper): больше — живее, но хрип.
+    pub tts_noise: f32,
+    /// Разброс длительности звуков (noise_scale_w у Piper): больше — живее
+    /// ритм, но запинки.
+    pub tts_noise_w: f32,
     /// Озвучивать подробности синтезом (вопрос-разрешение с описанием
     /// команды, «вы имели в виду X или Y?»). Выключено — вопрос и уточнение
     /// звучат фразами звукового пакета (`ask`, `not_understood`), подробности —
@@ -161,6 +166,7 @@ impl Voice {
 }
 
 pub const TTS_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
+pub const TTS_NOISE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -453,6 +459,16 @@ impl Config {
             "voice.tts_speed",
             out_of_range(self.voice.tts_speed, &TTS_SPEED_RANGE),
         );
+        for (value, key) in [
+            (self.voice.tts_noise, "voice.tts_noise"),
+            (self.voice.tts_noise_w, "voice.tts_noise_w"),
+        ] {
+            check(
+                TTS_NOISE_RANGE.contains(&value),
+                key,
+                out_of_range(value, &TTS_NOISE_RANGE),
+            );
+        }
         check(
             self.llm.model.trim().starts_with("claude-")
                 && !self.llm.model.contains(char::is_whitespace),
@@ -736,6 +752,21 @@ mod tests {
                 "logging.max_files"
             ]
         );
+    }
+
+    #[test]
+    fn synthesis_noise_is_checked() {
+        let config = load(Some("[voice]\ntts_noise = 0.2\ntts_noise_w = 0.2\n")).unwrap();
+        assert_eq!(
+            (config.voice.tts_noise, config.voice.tts_noise_w),
+            (0.2, 0.2)
+        );
+        let err = load(Some("[voice]\ntts_noise = 1.5\ntts_noise_w = -0.1\n")).unwrap_err();
+        let ConfigError::Invalid(problems) = err else {
+            panic!("ожидали Invalid, получили {err:?}");
+        };
+        let keys: Vec<_> = problems.iter().map(|p| p.key).collect();
+        assert_eq!(keys, ["voice.tts_noise", "voice.tts_noise_w"]);
     }
 
     #[test]
