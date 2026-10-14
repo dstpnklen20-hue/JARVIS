@@ -1,0 +1,12 @@
+# Дополнительное сохранение чекпоинтов: голос выбирается на слух, поэтому
+# сохраняем каждые 50 эпох, все. Встроенное сохранение по val_mel (5 лучших
+# и last.ckpt) остаётся; по val_mos — убрано в run_train.py.
+trainer:
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        every_n_epochs: 50
+        save_top_k: -1
+        save_last: false
+        filename: "epoch={epoch}"
+        auto_insert_metric_name: false
