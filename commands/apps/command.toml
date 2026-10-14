@@ -9,6 +9,7 @@ id = "app_notepad"
 phrases = ["открой блокнот", "запусти блокнот"]
 description = "запустит Блокнот"
 reply = "ok"
+close = true
 [command.action]
 type = "launch_app"
 path = "notepad.exe"
@@ -18,6 +19,8 @@ id = "app_calculator"
 phrases = ["открой калькулятор", "запусти калькулятор"]
 description = "запустит Калькулятор"
 reply = "ok"
+close = true
+close_process = "CalculatorApp.exe"
 [command.action]
 type = "launch_app"
 path = "calc.exe"
@@ -46,6 +49,7 @@ id = "app_claude"
 phrases = ["запусти клод", "открой клод", "запусти клоуд", "открой клоуд"]
 description = "запустит приложение Claude"
 reply = "ok"
+close = true
 [command.action]
 type = "launch_app"
 path = "explorer.exe"

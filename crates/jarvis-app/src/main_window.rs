@@ -314,7 +314,7 @@ pub fn commands_json(registry: &Registry, permissions: &PermissionStore) -> Valu
                     offer_always: false
                 }
             );
-            let form = crate::command_editor::form_of(c);
+            let form = crate::command_editor::form_of(c, registry);
             json!({
                 "id": c.id,
                 "pack": c.pack,

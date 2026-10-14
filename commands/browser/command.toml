@@ -30,6 +30,7 @@ id = "open_browser"
 phrases = ["открой браузер", "запусти браузер", "открой файрфокс", "запусти файрфокс"]
 description = "выведет вперёд окно Firefox, а если он закрыт — запустит"
 reply = "ok"
+close = true
 [command.action]
 type = "launch_app"
 path = 'C:\Program Files\Mozilla Firefox\firefox.exe'

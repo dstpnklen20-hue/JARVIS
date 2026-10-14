@@ -375,7 +375,7 @@ impl Core {
         Ok(Self {
             state: State::Idle,
             timings: Timings {
-                listen: Duration::from_secs(u64::from(p.config.wake.listen_secs)),
+                listen: Duration::from_secs_f32(p.config.wake.listen_secs),
                 follow_up: Duration::from_secs(u64::from(p.config.session.follow_up_secs)),
                 ask: ASK_TIMEOUT,
                 dialog: None,

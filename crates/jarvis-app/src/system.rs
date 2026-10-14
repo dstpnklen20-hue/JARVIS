@@ -88,4 +88,8 @@ impl System for PlatformSystem {
     fn process_running(&self, name: &str) -> Result<bool, String> {
         jarvis_platform::process_running(name)
     }
+
+    fn close_app(&self, name: &str) -> Result<usize, String> {
+        jarvis_platform::close_app(name)
+    }
 }

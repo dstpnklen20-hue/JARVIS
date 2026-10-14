@@ -20,7 +20,7 @@ pub use actions::{MediaKey, media_key, open_url};
 pub use answer_window::{AnswerStatus, AnswerView, AnswerWindow, LogoPainter, show_answer_window};
 pub use app_window::{AppWindow, AppWindowSpec, open_app_window, use_per_monitor_dpi};
 pub use autostart::{autostart_command, set_autostart};
-pub use browser::{activate_browser_tab, focus_app, focus_browser, process_running};
+pub use browser::{activate_browser_tab, close_app, focus_app, focus_browser, process_running};
 pub use dialog::{DialogButton, DialogHandle, DialogSpec, show_dialog};
 pub use event_loop::{
     LoopEvent, Waker, current_waker, install_ctrl_handler, notify_shutdown_complete,

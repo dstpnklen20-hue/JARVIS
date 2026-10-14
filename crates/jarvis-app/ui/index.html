@@ -457,6 +457,7 @@
             <textarea id="ed-args" rows="2" placeholder="необязательно, по одному в строке"></textarea>
           </label>
           <label class="check"><input type="checkbox" id="ed-focus" checked> Уже открыта — вывести её окно вперёд</label>
+          <label class="check" title="Появится команда «закрой …» из фраз «открой / запусти / включи …». Закрывает окна, как крестиком."><input type="checkbox" id="ed-close"> Закрывать голосом («закрой …»)</label>
         </div>
         <div class="act" data-act="hotkey">
           <label class="fld"><span>Сочетание</span>
@@ -806,6 +807,7 @@ function openEditor(form) {
   $("ed-path").value = a.path || "";
   $("ed-args").value = (a.args || []).join("\n");
   $("ed-focus").checked = a.type === "launch_app" ? !!a.focus : true;
+  $("ed-close").checked = a.type === "launch_app" ? !!a.close : true;
   $("ed-keys").value = (a.keys || []).join("+");
   $("ed-key").value = a.key || "";
   $("ed-media").value = a.operation || "play_pause";
@@ -827,7 +829,7 @@ function readAction() {
                find_tab: $("ed-tabs").value.split(";").map((s) => s.trim()).filter(Boolean) };
     case "launch_app":
       return { type: "launch_app", path: $("ed-path").value, args: lines($("ed-args").value),
-               focus: $("ed-focus").checked };
+               focus: $("ed-focus").checked, close: $("ed-close").checked };
     case "hotkey":
       return { type: "hotkey", keys: $("ed-keys").value.split("+").map((s) => s.trim()).filter(Boolean) };
     case "key_press":

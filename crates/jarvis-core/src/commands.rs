@@ -45,6 +45,17 @@ struct CommandFile {
     #[serde(default)]
     slots: BTreeMap<String, SlotSpec>,
     action: ActionSpec,
+    /// Только у `launch_app`: добавить парную команду закрытия `<id>_close`
+    /// («открой телеграм» → «закрой телеграм»), см. [`close_command`].
+    #[serde(default)]
+    close: bool,
+    /// Свои фразы закрытия (иначе — из фраз открытия).
+    #[serde(default)]
+    close_phrases: Vec<String>,
+    /// Процесс, чьи окна закрывать, если это не `focus` и не файл из `path`
+    /// (calc.exe запускает CalculatorApp.exe).
+    #[serde(default)]
+    close_process: Option<String>,
 }
 
 fn default_reply() -> String {
@@ -88,6 +99,11 @@ pub enum ActionSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         focus: Option<String>,
     },
+    /// Закрыть окна программы (по имени процесса), как крестиком: программа
+    /// может спросить о сохранении; свёрнутая в трей там и остаётся.
+    /// Принудительно ничего не завершается. Обычно не пишется вручную, а
+    /// получается из `close = true` у команды с `launch_app`.
+    CloseApp { process: String },
     /// Запустить скрипт из папки пакета и дождаться его (с тайм-аутом).
     RunScript {
         /// Путь внутри папки пакета.
@@ -205,6 +221,7 @@ impl ActionSpec {
                 ),
                 None => format!("запустит {path}{}", args_text(args)),
             },
+            ActionSpec::CloseApp { process } => format!("закроет окна {process}, как крестиком"),
             ActionSpec::RunScript {
                 path,
                 args,
@@ -491,13 +508,18 @@ impl Registry {
         let mut ids: HashSet<String> = self.commands.iter().map(|c| c.id.clone()).collect();
         for cmd in file.commands {
             match validate(cmd, &file.pack, &dir) {
-                Ok(command) if ids.contains(&command.id) => self.errors.push(problem(format!(
-                    "команда `{}` пропущена: такой id уже есть в другом пакете",
-                    command.id
-                ))),
-                Ok(command) => {
-                    ids.insert(command.id.clone());
-                    self.commands.push(command);
+                Ok(commands) => {
+                    for command in commands {
+                        if ids.contains(&command.id) {
+                            self.errors.push(problem(format!(
+                                "команда `{}` пропущена: такой id уже есть",
+                                command.id
+                            )));
+                        } else {
+                            ids.insert(command.id.clone());
+                            self.commands.push(command);
+                        }
+                    }
                 }
                 Err(message) => self.errors.push(problem(message)),
             }
@@ -524,7 +546,138 @@ impl Registry {
     }
 }
 
-fn validate(cmd: CommandFile, pack: &str, dir: &Path) -> Result<Command, String> {
+/// Команда из манифеста и, если у неё `close = true`, парная команда закрытия.
+fn validate(cmd: CommandFile, pack: &str, dir: &Path) -> Result<Vec<Command>, String> {
+    let close = (
+        cmd.close,
+        cmd.close_phrases.clone(),
+        cmd.close_process.clone(),
+    );
+    let command = validate_command(cmd, pack, dir)?;
+    let (enabled, phrases, process) = close;
+    if !enabled {
+        if !phrases.is_empty() || process.is_some() {
+            return Err(format!(
+                "команда `{}`: close_phrases и close_process — только вместе с close = true",
+                command.id
+            ));
+        }
+        return Ok(vec![command]);
+    }
+    let closing = close_command(&command, &phrases, process.as_deref())
+        .map_err(|e| format!("команда `{}`: close: {e}", command.id))?;
+    Ok(vec![command, closing])
+}
+
+/// Глаголы открытия, которые во фразах закрытия становятся «закрой».
+const OPEN_VERBS: [&str; 3] = ["открой", "запусти", "включи"];
+/// Процессы, окна которых закрывать нельзя: оболочка Windows (у Проводника —
+/// ещё и панель задач), системные процессы и сам Джарвис.
+const PROTECTED_PROCESSES: [&str; 17] = [
+    "explorer.exe",
+    "jarvis.exe",
+    "jarvisw.exe",
+    "applicationframehost.exe",
+    "csrss.exe",
+    "ctfmon.exe",
+    "dwm.exe",
+    "lsass.exe",
+    "searchhost.exe",
+    "services.exe",
+    "shellexperiencehost.exe",
+    "sihost.exe",
+    "smss.exe",
+    "startmenuexperiencehost.exe",
+    "svchost.exe",
+    "wininit.exe",
+    "winlogon.exe",
+];
+
+/// Парная команда закрытия к команде с `launch_app`: id `<id>_close`, фразы —
+/// свои или из фраз открытия («открой / запусти / включи X» → «закрой X»),
+/// процесс — `close_process`, `focus` или файл из `path`.
+fn close_command(
+    open: &Command,
+    phrases: &[String],
+    process: Option<&str>,
+) -> Result<Command, String> {
+    // Запуск — само действие или последний шаг-запуск цепочки («Загружаю,
+    // сэр» → игра через Steam).
+    let launch = match &open.action {
+        ActionSpec::Sequence { steps } => steps
+            .iter()
+            .rev()
+            .find(|s| matches!(s, ActionSpec::LaunchApp { .. })),
+        action => Some(action),
+    };
+    let Some(ActionSpec::LaunchApp { path, focus, .. }) = launch else {
+        return Err("бывает только у команды с launch_app (или цепочки с ним)".into());
+    };
+    let process = match process.or(focus.as_deref()) {
+        Some(name) => name.trim().to_owned(),
+        None => Path::new(path.trim())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let action = ActionSpec::CloseApp {
+        process: process.clone(),
+    };
+    validate_action(&action, &open.dir, &BTreeMap::new(), false)?;
+
+    let mut close_phrases: Vec<String> = Vec::new();
+    let mut add = |phrase: String| {
+        if !close_phrases.contains(&phrase) {
+            close_phrases.push(phrase);
+        }
+    };
+    if phrases.is_empty() {
+        for phrase in &open.phrases {
+            if let Some((verb, rest)) = phrase.split_once(' ')
+                && OPEN_VERBS.contains(&verb.to_lowercase().as_str())
+            {
+                add(format!("закрой {}", rest.trim()));
+            }
+        }
+        if close_phrases.is_empty() {
+            return Err(
+                "не из чего сделать фразы закрытия (нет «открой / запусти / включи …») — укажите close_phrases"
+                    .into(),
+            );
+        }
+    } else {
+        phrases
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .for_each(|p| add(p.to_owned()));
+    }
+    if let Some(bad) = close_phrases
+        .iter()
+        .find(|p| jarvis_nlu::normalize(p).is_empty() || !placeholders(p).is_empty())
+    {
+        return Err(format!("фраза «{bad}» пустая или со слотом"));
+    }
+
+    let description = ["запустит ", "откроет "]
+        .iter()
+        .find_map(|verb| open.description.strip_prefix(verb))
+        .map(|what| format!("закроет {what}"))
+        .unwrap_or_else(|| format!("закроет окна {process}"));
+    Ok(Command {
+        id: format!("{}_close", open.id),
+        pack: open.pack.clone(),
+        phrases: close_phrases,
+        description,
+        reply: open.reply,
+        always_ask: false,
+        slots: BTreeMap::new(),
+        action,
+        dir: open.dir.clone(),
+    })
+}
+
+fn validate_command(cmd: CommandFile, pack: &str, dir: &Path) -> Result<Command, String> {
     let id = cmd.id.trim().to_owned();
     if id.is_empty()
         || !id
@@ -719,6 +872,15 @@ fn validate_action(
                 if !wd.is_dir() {
                     return Err(format!("launch_app: папки {} нет", wd.display()));
                 }
+            }
+            Ok(())
+        }
+        ActionSpec::CloseApp { process } => {
+            process_name(process).map_err(|e| format!("close_app: process {e}"))?;
+            if PROTECTED_PROCESSES.contains(&process.trim().to_ascii_lowercase().as_str()) {
+                return Err(format!(
+                    "close_app: окна {process} закрывать нельзя (оболочка или система Windows, сам Джарвис)"
+                ));
             }
             Ok(())
         }
@@ -1568,5 +1730,178 @@ operation = "next"
             serde_json::to_string(&plain).unwrap(),
             r#"{"type":"open_url","url":"https://youtube.com"}"#
         );
+    }
+
+    const NOTEPAD: &str = "type = \"launch_app\"
+path = \"notepad.exe\"";
+
+    #[test]
+    fn close_true_adds_paired_close_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = one(
+            dir.path(),
+            r#""открой блокнот", "запусти блокнот", "блокнот""#,
+            "close = true",
+            NOTEPAD,
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(r.commands.len(), 2);
+        let close = r.get("c_close").unwrap();
+        // «открой» и «запусти» — одна фраза закрытия; «блокнот» без глагола — нет.
+        assert_eq!(close.phrases, ["закрой блокнот"]);
+        assert_eq!(
+            close.action,
+            ActionSpec::CloseApp {
+                process: "notepad.exe".into()
+            }
+        );
+        assert!(!close.always_ask);
+        // У самой команды открытия ничего не поменялось.
+        assert_eq!(r.get("c").unwrap().phrases.len(), 3);
+    }
+
+    #[test]
+    fn close_uses_own_phrases_focus_and_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = one(
+            dir.path(),
+            r#""запусти браузер""#,
+            r#"close = true
+close_phrases = ["закрой браузер", "выключи браузер"]"#,
+            "type = \"launch_app\"
+path = \"firefox.exe\"
+focus = \"Firefox.exe\"",
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let close = r.get("c_close").unwrap();
+        assert_eq!(close.phrases, ["закрой браузер", "выключи браузер"]);
+        assert_eq!(
+            close.action,
+            ActionSpec::CloseApp {
+                process: "Firefox.exe".into()
+            }
+        );
+        let r = one(
+            dir.path(),
+            r#""открой калькулятор""#,
+            "close = true
+close_process = \"CalculatorApp.exe\"",
+            "type = \"launch_app\"
+path = \"calc.exe\"",
+        );
+        assert_eq!(
+            r.get("c_close").unwrap().action,
+            ActionSpec::CloseApp {
+                process: "CalculatorApp.exe".into()
+            }
+        );
+    }
+
+    #[test]
+    fn close_works_for_sequence_with_launch_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = one(
+            dir.path(),
+            r#""запусти кс""#,
+            "close = true\nclose_process = \"cs2.exe\"",
+            "type = \"sequence\"\n[[command.action.steps]]\ntype = \"wait\"\nms = 10\n\
+             [[command.action.steps]]\ntype = \"launch_app\"\npath = \"steam.exe\"",
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let close = r.get("c_close").unwrap();
+        assert_eq!(close.phrases, ["закрой кс"]);
+        assert_eq!(
+            close.action,
+            ActionSpec::CloseApp {
+                process: "cs2.exe".into()
+            }
+        );
+    }
+
+    #[test]
+    fn close_is_refused_where_it_makes_no_sense_or_is_dangerous() {
+        let dir = tempfile::tempdir().unwrap();
+        // Проводник — это и панель задач.
+        let r = one(
+            dir.path(),
+            r#""открой проводник""#,
+            "close = true",
+            "type = \"launch_app\"
+path = \"explorer.exe\"",
+        );
+        assert!(r.commands.is_empty());
+        assert!(
+            r.errors[0].message.contains("закрывать нельзя"),
+            "{:?}",
+            r.errors
+        );
+        // Не программа.
+        let r = one(
+            dir.path(),
+            r#""открой ютуб""#,
+            "close = true",
+            "type = \"open_url\"
+url = \"https://youtube.com\"",
+        );
+        assert!(r.errors[0].message.contains("launch_app"), "{:?}", r.errors);
+        // Фраз для закрытия не из чего сделать.
+        let r = one(dir.path(), r#""блокнот""#, "close = true", NOTEPAD);
+        assert!(
+            r.errors[0].message.contains("close_phrases"),
+            "{:?}",
+            r.errors
+        );
+        // Свои фразы без close = true — скорее опечатка.
+        let r = one(
+            dir.path(),
+            r#""открой блокнот""#,
+            "close_phrases = [\"закрой блокнот\"]",
+            NOTEPAD,
+        );
+        assert!(
+            r.errors[0].message.contains("close = true"),
+            "{:?}",
+            r.errors
+        );
+        // Вручную close_app с защищённым процессом — тоже нет.
+        let r = one(
+            dir.path(),
+            r#""закрой всё""#,
+            "",
+            "type = \"close_app\"
+process = \"explorer.exe\"",
+        );
+        assert!(
+            r.errors[0].message.contains("закрывать нельзя"),
+            "{:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn close_id_clash_is_reported() {
+        let text = r#"
+pack = "t"
+version = 1
+[[command]]
+id = "c"
+phrases = ["открой блокнот"]
+description = "запустит Блокнот"
+close = true
+[command.action]
+type = "launch_app"
+path = "notepad.exe"
+[[command]]
+id = "c_close"
+phrases = ["убери блокнот"]
+description = "d"
+[command.action]
+type = "close_app"
+process = "notepad.exe"
+"#;
+        let r = load(text);
+        assert_eq!(r.commands.len(), 2);
+        assert_eq!(r.get("c_close").unwrap().description, "закроет Блокнот");
+        assert!(r.errors[0].message.contains("уже есть"), "{:?}", r.errors);
     }
 }

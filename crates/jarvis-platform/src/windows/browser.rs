@@ -30,9 +30,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow,
-    GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
+    BringWindowToTop, EnumChildWindows, EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW,
+    GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SW_RESTORE,
+    SetForegroundWindow, ShowWindow, WM_CLOSE, WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::BOOL;
 
@@ -301,6 +302,42 @@ pub fn focus_app(name: &str) -> Result<bool, String> {
     if pids.is_empty() {
         return Ok(false);
     }
+    let main = main_windows()
+        .into_iter()
+        .find(|&hwnd| pids.contains(&window_pid(hwnd)));
+    Ok(main.is_some_and(|hwnd| {
+        bring_to_front(hwnd);
+        true
+    }))
+}
+
+/// Закрыть окна программы (по имени файла процесса), как крестиком: главным
+/// окнам уходит WM_CLOSE. Программа может спросить о сохранении; свёрнутая в
+/// трей остаётся в трее — принудительно ничего не завершается. Окна
+/// приложений из Microsoft Store принадлежат ApplicationFrameHost — их
+/// узнаём по дочернему окну самой программы. Возвращает, сколько окон
+/// попросили закрыться (0 — программа не запущена или окон не видно).
+pub fn close_app(name: &str) -> Result<usize, String> {
+    let pids = process_ids(name)?;
+    if pids.is_empty() {
+        return Ok(0);
+    }
+    let targets: Vec<RawHwnd> = main_windows()
+        .into_iter()
+        .filter(|&hwnd| pids.contains(&window_pid(hwnd)) || has_child_of(hwnd, &pids))
+        .collect();
+    for &hwnd in &targets {
+        // SAFETY: только ставит сообщение в очередь окна; закрытое к этому
+        // времени окно вернёт ошибку — это не страшно.
+        unsafe {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+    }
+    Ok(targets.len())
+}
+
+/// Главные окна программ сверху вниз.
+fn main_windows() -> Vec<RawHwnd> {
     let mut windows: Vec<RawHwnd> = Vec::new();
     // SAFETY: колбэк получает указатель на `windows`, живой до конца EnumWindows.
     unsafe {
@@ -309,16 +346,39 @@ pub fn focus_app(name: &str) -> Result<bool, String> {
             &mut windows as *mut Vec<RawHwnd> as LPARAM,
         );
     }
-    let main = windows.into_iter().find(|&hwnd| {
-        let mut pid = 0u32;
-        // SAFETY: hwnd — от EnumWindows, `pid` — валидный указатель.
-        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        pids.contains(&pid)
-    });
-    Ok(main.is_some_and(|hwnd| {
-        bring_to_front(hwnd);
-        true
-    }))
+    windows
+}
+
+fn window_pid(hwnd: RawHwnd) -> u32 {
+    let mut pid = 0u32;
+    // SAFETY: hwnd — от EnumWindows / EnumChildWindows, `pid` — валидный указатель.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    pid
+}
+
+/// Есть ли у окна дочернее окно одного из процессов `pids`.
+fn has_child_of(hwnd: RawHwnd, pids: &[u32]) -> bool {
+    let mut search = (pids, false);
+    // SAFETY: колбэк получает указатель на `search`, живой до конца EnumChildWindows.
+    unsafe {
+        EnumChildWindows(
+            hwnd,
+            Some(find_child_of),
+            &mut search as *mut (&[u32], bool) as LPARAM,
+        );
+    }
+    search.1
+}
+
+unsafe extern "system" fn find_child_of(hwnd: RawHwnd, lparam: LPARAM) -> BOOL {
+    // SAFETY: `lparam` — указатель на кортеж из `has_child_of`, живой на время
+    // EnumChildWindows; других ссылок на него в это время нет.
+    let search = unsafe { &mut *(lparam as *mut (&[u32], bool)) };
+    if search.0.contains(&window_pid(hwnd)) {
+        search.1 = true;
+        return 0; // нашли — перебор не продолжать
+    }
+    1
 }
 
 /// Главные окна программ: видимые, без владельца, с заголовком, не панели инструментов.

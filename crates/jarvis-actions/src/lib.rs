@@ -113,6 +113,9 @@ pub trait System: Send + Sync {
     fn focus_browser(&self) -> bool;
     /// Запущен ли процесс с таким именем файла (`steam.exe`), без учёта регистра.
     fn process_running(&self, name: &str) -> Result<bool, String>;
+    /// Закрыть окна программы (по имени процесса), как крестиком; сколько
+    /// окон попросили закрыться (0 — не запущена или окон не видно).
+    fn close_app(&self, name: &str) -> Result<usize, String>;
 }
 
 /// Чем закончилось действие.
@@ -168,6 +171,8 @@ pub enum ActionError {
     ProcessNotStarted { name: String, secs: u64 },
     #[error("не удалось проверить процессы: {0}")]
     Processes(String),
+    #[error("не удалось закрыть окна: {0}")]
+    Close(String),
 }
 
 fn tail(output: &str) -> String {
@@ -278,6 +283,16 @@ pub fn execute(action: &ActionSpec, ctx: &Context<'_>) -> Result<Outcome, Action
             ctx.system
                 .spawn_detached(&spec)
                 .map_err(ActionError::Spawn)?;
+            Ok(Outcome::Done)
+        }
+        ActionSpec::CloseApp { process } => {
+            let closed = ctx.system.close_app(process).map_err(ActionError::Close)?;
+            if closed == 0 {
+                // Не запущена или свёрнута в трей — закрывать нечего, это не ошибка.
+                tracing::info!(%process, "окон программы не видно — закрывать нечего");
+            } else {
+                tracing::info!(%process, windows = closed, "попросил окна программы закрыться");
+            }
             Ok(Outcome::Done)
         }
         ActionSpec::RunScript {
@@ -512,6 +527,11 @@ mod tests {
             *checks += 1;
             self.log(format!("check {name}"))?;
             Ok(self.process_after.is_some_and(|n| *checks > n))
+        }
+
+        fn close_app(&self, name: &str) -> Result<usize, String> {
+            self.log(format!("close {name}"))?;
+            Ok(usize::from(self.running.iter().any(|r| r == name)))
         }
     }
 
@@ -940,5 +960,27 @@ mod tests {
             calls(&closed),
             ["focus firefox.exe", "spawn C:\\Firefox\\firefox.exe []"]
         );
+    }
+
+    #[test]
+    fn close_app_closes_windows_and_is_quiet_when_nothing_to_close() {
+        let close = ActionSpec::CloseApp {
+            process: "notepad.exe".into(),
+        };
+        let open = Fake {
+            running: vec!["notepad.exe".into()],
+            ..Fake::default()
+        };
+        assert_eq!(run(&close, &open), Ok(Outcome::Done));
+        assert_eq!(calls(&open), ["close notepad.exe"]);
+        // Не запущена — не ошибка: закрывать нечего.
+        let none = Fake::default();
+        assert_eq!(run(&close, &none), Ok(Outcome::Done));
+        // Сбой системного вызова — ошибка действия («Не удалось, сэр»).
+        let broken = Fake {
+            fail: true,
+            ..Fake::default()
+        };
+        assert!(matches!(run(&close, &broken), Err(ActionError::Close(_))));
     }
 }

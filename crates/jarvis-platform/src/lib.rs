@@ -48,8 +48,9 @@ pub use windows::{
 /// Системные действия команд: адреса, мультимедиа, процессы, клавиши, питание, громкость.
 #[cfg(windows)]
 pub use windows::{
-    MediaKey, Power, RunEnd, activate_browser_tab, focus_app, focus_browser, media_key, open_url,
-    power, press_keys, process_running, release_all_keys, run_and_wait, set_volume, spawn_detached,
+    MediaKey, Power, RunEnd, activate_browser_tab, close_app, focus_app, focus_browser, media_key,
+    open_url, power, press_keys, process_running, release_all_keys, run_and_wait, set_volume,
+    spawn_detached,
 };
 
 /// Мягкая остановка работающей копии извне (`jarvis --stop`).
@@ -259,5 +260,44 @@ mod tests {
         window.close();
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!window.is_open());
+    }
+
+    /// Открывает Блокнот и Калькулятор (приложение из Microsoft Store — окно у
+    /// ApplicationFrameHost) и закрывает их, как крестиком. Закроет и уже
+    /// открытые окна этих программ — запускать, когда они не нужны.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "открывает и закрывает Блокнот и Калькулятор"]
+    fn close_app_closes_classic_and_store_windows() {
+        use std::time::{Duration, Instant};
+        let wait_window = |process: &str| {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(10) {
+                if focus_app(process).unwrap() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            false
+        };
+        for (program, process) in [
+            ("notepad.exe", "notepad.exe"),
+            ("calc.exe", "CalculatorApp.exe"),
+        ] {
+            spawn_detached(std::path::Path::new(program), &[], None).unwrap();
+            assert!(wait_window(process), "{program}: окно не появилось");
+            assert!(
+                close_app(process).unwrap() >= 1,
+                "{process}: окна не нашлись"
+            );
+            std::thread::sleep(Duration::from_secs(2));
+            assert_eq!(
+                close_app(process).unwrap(),
+                0,
+                "{process}: окно не закрылось"
+            );
+        }
+        // Не запущена — закрывать нечего.
+        assert_eq!(close_app("nosuchprogram.exe").unwrap(), 0);
     }
 }

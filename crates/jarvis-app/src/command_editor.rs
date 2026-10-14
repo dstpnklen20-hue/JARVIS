@@ -46,6 +46,9 @@ pub enum SimpleAction {
         /// Уже запущена — вывести окно вперёд вместо нового запуска.
         #[serde(default)]
         focus: bool,
+        /// Добавить команду закрытия («закрой …», `close = true` в манифесте).
+        #[serde(default)]
+        close: bool,
     },
     Hotkey {
         keys: Vec<String>,
@@ -112,8 +115,9 @@ pub struct Saved {
     pub warnings: Vec<String>,
 }
 
-/// Команда в виде формы редактора, если её можно править в окне.
-pub fn form_of(command: &Command) -> Option<CommandForm> {
+/// Команда в виде формы редактора, если её можно править в окне. Реестр —
+/// чтобы узнать, есть ли у команды парная команда закрытия (`<id>_close`).
+pub fn form_of(command: &Command, registry: &Registry) -> Option<CommandForm> {
     if command.pack != USER_PACK || !command.slots.is_empty() {
         return None;
     }
@@ -142,10 +146,14 @@ pub fn form_of(command: &Command) -> Option<CommandForm> {
             {
                 return None;
             }
+            let close_id = format!("{}_close", command.id);
             SimpleAction::LaunchApp {
                 path: path.clone(),
                 args: args.clone(),
                 focus: focus.is_some(),
+                close: registry
+                    .get(&close_id)
+                    .is_some_and(|c| matches!(c.action, ActionSpec::CloseApp { .. })),
             }
         }
         ActionSpec::Hotkey {
@@ -275,10 +283,16 @@ fn clean(form: &CommandForm) -> Result<CommandForm, EditorError> {
                 find_tab: trimmed(find_tab),
             }
         }
-        SimpleAction::LaunchApp { path, args, focus } => SimpleAction::LaunchApp {
+        SimpleAction::LaunchApp {
+            path,
+            args,
+            focus,
+            close,
+        } => SimpleAction::LaunchApp {
             path: path.trim().trim_matches('"').to_owned(),
             args: trimmed(args),
             focus: *focus,
+            close: *close,
         },
         SimpleAction::Hotkey { keys } => {
             let keys = trimmed(keys);
@@ -378,6 +392,18 @@ fn upsert(text: &str, path: &Path, id: &str, form: &CommandForm) -> Result<Strin
         table.remove("always_ask");
     }
     table.insert("action", Item::Table(action_table(&form.action)));
+    // Закрытие — поле команды, не действия; свои фразы и процесс закрытия,
+    // заданные вручную, редактор не трогает (пока закрытие включено).
+    match &form.action {
+        SimpleAction::LaunchApp { close: true, .. } => {
+            table.insert("close", value(true));
+        }
+        _ => {
+            for key in ["close", "close_phrases", "close_process"] {
+                table.remove(key);
+            }
+        }
+    }
     Ok(doc.to_string())
 }
 
@@ -391,7 +417,9 @@ fn action_table(action: &SimpleAction) -> Table {
                 t.insert("find_tab", value(Array::from_iter(find_tab.iter())));
             }
         }
-        SimpleAction::LaunchApp { path, args, focus } => {
+        SimpleAction::LaunchApp {
+            path, args, focus, ..
+        } => {
             t.insert("type", value("launch_app"));
             t.insert("path", value(path.as_str()));
             if !args.is_empty() {
@@ -608,7 +636,7 @@ mod tests {
         assert_eq!(cmd.phrases, ["открой почту"]);
         assert!(registry.get("my_keep").is_some());
         // Форма из загруженной команды — та же.
-        let back = form_of(cmd).unwrap();
+        let back = form_of(cmd, &registry).unwrap();
         assert_eq!(back.action, site("https://mail.google.com"));
     }
 
@@ -645,6 +673,7 @@ mod tests {
                     path: r"C:\нет\такой\программы.exe".into(),
                     args: Vec::new(),
                     focus: true,
+                    close: false,
                 },
             ),
         )
@@ -696,8 +725,38 @@ mod tests {
     fn only_user_pack_simple_commands_are_editable() {
         let dir = commands_dir();
         let registry = Registry::load(dir.path());
-        assert!(form_of(registry.get("my_keep").unwrap()).is_some());
-        assert!(form_of(registry.get("open_youtube").unwrap()).is_none());
+        assert!(form_of(registry.get("my_keep").unwrap(), &registry).is_some());
+        assert!(form_of(registry.get("open_youtube").unwrap(), &registry).is_none());
+    }
+
+    #[test]
+    fn launch_app_with_close_adds_and_removes_close_command() {
+        let dir = commands_dir();
+        // Программа, которая точно есть: сам тестовый исполняемый файл.
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        let app = |close: bool| SimpleAction::LaunchApp {
+            path: exe.clone(),
+            args: Vec::new(),
+            focus: true,
+            close,
+        };
+        let saved = save(dir.path(), &form("запусти тест", app(true))).unwrap();
+        let registry = Registry::load(dir.path());
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+        let close = registry.get(&format!("{}_close", saved.id)).unwrap();
+        assert_eq!(close.phrases, ["закрой тест"]);
+        let back = form_of(registry.get(&saved.id).unwrap(), &registry).unwrap();
+        assert_eq!(back.action, app(true));
+        // Закрытие сгенерировано — в редакторе его не правят.
+        assert!(form_of(close, &registry).is_none());
+
+        let mut f = form("запусти тест", app(false));
+        f.id = Some(saved.id.clone());
+        save(dir.path(), &f).unwrap();
+        let registry = Registry::load(dir.path());
+        assert!(registry.get(&format!("{}_close", saved.id)).is_none());
+        let text = std::fs::read_to_string(dir.path().join("my/command.toml")).unwrap();
+        assert!(!text.contains("close"), "{text}");
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub const SYSTEM_DEFAULT_DEVICE: &str = "default";
 pub const FOLLOW_UP_SECS_RANGE: std::ops::RangeInclusive<u32> = 3..=60;
 pub const DIALOG_IDLE_MINS_RANGE: std::ops::RangeInclusive<u32> = 1..=120;
 pub const LOG_MAX_FILES_RANGE: std::ops::RangeInclusive<usize> = 1..=365;
-pub const LISTEN_SECS_RANGE: std::ops::RangeInclusive<u32> = 2..=30;
+pub const LISTEN_SECS_RANGE: std::ops::RangeInclusive<f32> = 1.0..=30.0;
 pub const MAX_EDIT_DISTANCE: usize = 2;
 pub const VOLUME_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 pub const END_SILENCE_MS_RANGE: std::ops::RangeInclusive<u32> = 300..=2000;
@@ -60,7 +60,7 @@ pub struct Wake {
     /// Допустимое расстояние Левенштейна до слова активации.
     pub max_edit_distance: usize,
     /// Сколько секунд после «Джарвис» ждать команду.
-    pub listen_secs: u32,
+    pub listen_secs: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn wake_and_voice_values_are_validated() {
         let err = load(Some(
-            "[wake]\nwords = []\nmax_edit_distance = 3\nlisten_secs = 1\n[voice]\nvolume = 3.0\npack = \"\"\n",
+            "[wake]\nwords = []\nmax_edit_distance = 3\nlisten_secs = 0.5\n[voice]\nvolume = 3.0\npack = \"\"\n",
         ))
         .unwrap_err();
         let ConfigError::Invalid(problems) = err else {
